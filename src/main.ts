@@ -449,6 +449,8 @@ function readPreview(issueId: string, since: number): Approved | undefined {
  * Publica el comentario aprobado y entrega la petición («Terminado por Desarrollo»). Lo hace
  * bin/redmine_comentar.py, que comprueba que Redmine lo guardó y no lo repite si ya estaba
  * publicado. Devuelve el resumen en una línea.
+ *  - Solo se mueve el estado de lo que está asignado a esta cuenta («cada quien mueve lo que
+ *    tiene asignado»): si la petición ya es de otra persona, se publica el comentario y nada más.
  *  - Trabajo: si la petición no había pasado por «En curso», pasa primero (no se entrega sin
  *    fecha fin ni tiempo estimado) y después se entrega.
  *  - Respuesta a un comentario: solo se mueve el estado si la petición sigue de nuestro lado;
@@ -456,15 +458,16 @@ function readPreview(issueId: string, since: number): Approved | undefined {
  */
 async function publish(issueId: string, approved: Approved, directory: string, kind: ReviewKind): Promise<string> {
   const linked = state.issues[issueId];
-  let handoff = true;
-  if (kind === "trabajo" && linked) {
+  const current = await redmine.detail(Number(issueId));
+  const mine = !current.assigned_to || state.userId === undefined || current.assigned_to.id === state.userId;
+  let handoff = mine && (kind === "trabajo" || OURS_STATUSES.some((n) => same(n, current.status.name)));
+  if (!mine) log(`#${issueId}: ahora está asignada a ${current.assigned_to?.name}; se publica el comentario sin mover el estado`);
+  if (handoff && same(current.status.name, HANDOFF_STATUS)) handoff = false;
+  if (handoff && kind === "trabajo" && linked) {
     await startIssue(issueId, linked, true).then(
       (what) => what && log(`#${issueId}: antes de entregar, ${what}`),
       (err) => log(`#${issueId}: no pude pasarla a «${START_STATUS}» antes de entregar (${errorText(err)})`),
     );
-  } else {
-    const current = await redmine.detail(Number(issueId));
-    handoff = OURS_STATUSES.some((n) => same(n, current.status.name));
   }
   const file = resolve(stateDir, `publicar-${issueId}.md`);
   writeFileSync(file, approved.notes, { mode: 0o600 });

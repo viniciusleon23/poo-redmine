@@ -20,6 +20,9 @@ termina el bloque, salvo que el propietario pulse «Publicar ya» en la Agenda d
 Después siguen Calidad, Consultoría y el cliente; si regresa como «Comentarios o no aprobado»,
 el comentario nuevo llega a la misma conversación.
 
+El vigilante solo mueve el estado de lo que está asignado a su cuenta («cada quien mueve lo
+que tiene asignado»): si la petición ya es de otra persona, publica el comentario y nada más.
+
 ### Dependencia con el frontal
 
 Si el plan nombra a alguien del frontal (`FRONT_PEOPLE`), al aprobarlo se crea su subtarea
