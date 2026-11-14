@@ -77,7 +77,10 @@ const pickupStatus = process.env.REDMINE_PICKUP_STATUS ?? ANALYSIS_STATUS;
 const pickupFrom = (process.env.REDMINE_PICKUP_FROM ?? "Nuevo o Pendiente").split(",").map((v) => v.trim()).filter(Boolean);
 // Acuse de recibo al tomar la incidencia: va junto al cambio de estado, en la misma petición.
 const ackEnabled = (process.env.REDMINE_ACK ?? "1") === "1";
-const commentTool = process.env.REDMINE_COMMENT_TOOL ?? resolve(root, "bin/redmine_comentar.py");
+// La ruta va escrita en el prompt de cada conversación: se usa la del enlace estable
+// (~/poo-redmine), no la carpeta de la revisión, que cambia en cada despliegue.
+const stableTool = `${process.env.HOME}/poo-redmine/bin/redmine_comentar.py`;
+const commentTool = process.env.REDMINE_COMMENT_TOOL ?? (existsSync(stableTool) ? stableTool : resolve(root, "bin/redmine_comentar.py"));
 const reviewModel = process.env.REDMINE_REVIEW_MODEL || undefined;
 // Rondas de corrección tras el supervisor y pasadas del supervisor por ciclo (un ciclo empieza
 // con cada mensaje del propietario o comentario nuevo de Redmine).
