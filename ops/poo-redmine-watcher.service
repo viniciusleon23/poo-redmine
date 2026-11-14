@@ -1,0 +1,17 @@
+[Unit]
+Description=Poo IA · vigilante de Redmine con agenda (asignación → análisis → agenda → en curso → cierre)
+After=poo-mobile-gateway.service network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/poo-redmine
+EnvironmentFile=%h/.config/poo-redmine-watcher/watcher.env
+EnvironmentFile=-%h/.config/poo-redmine/agenda.env
+ExecStart=%h/.fnm/aliases/default/bin/node --import tsx src/main.ts
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

@@ -2,32 +2,40 @@
  * Forma de operar del propietario para las incidencias de Redmine y las piezas puras del
  * ciclo. Sin efectos: main.ts las usa y tests/redmine-flow.test.ts las prueba.
  *
- * Flujo pedido por el propietario el 2026-11-12 tras auditar seis incidencias
- * (Brain: Decisiones/2026-11-12-redmine-plan-lo-aprueba-el-propietario.md). Sustituye la
- * regla del 11/11 de que el validador aprobaba el plan:
+ * Flujo del 14/11/2026 (sustituye al del 12/11; sigue la regla del equipo «Cambios en
+ * Redmine: nuevo flujo de peticiones» y la agenda de Capital Network):
  *
- *  1. Llega la incidencia: cambio de estado y acuse de recibo, con un texto de catálogo que
- *     va alternando (ackComment).
- *  2. La conversación decide el alcance y arma el plan con el workflow de siempre. El plan
- *     termina con cuatro líneas (qué pidieron, qué cambiamos, servicios afectados, por qué)
- *     y **lo aprueba el propietario**.
- *  3. Aprobado, ejecuta: rama, implementación y las pruebas de punta a punta del workflow.
- *  4. El supervisor (un modelo más fuerte) entra una vez, al final, y compara contra la
- *     solicitud original y el plan aprobado. Hay una ronda de corrección y una segunda
- *     pasada; si no cumple, se le sube al propietario.
- *  5. Cierre: qué se hizo, el comentario y lo que sube a main, con Finalizar, Rechazar o
- *     Esperar. Al finalizar, el agente sube a main y **el vigilante** publica el comentario
- *     por la API, con registro para no duplicarlo.
+ *  1. Llega la asignación: pasa a «En análisis o en revisión» con un acuse de catálogo
+ *     («Hola Catalina, trabajaré en ello 🐼» y variantes; nunca la misma dos veces seguidas).
+ *  2. La conversación decide el alcance y arma el plan. El plan termina con su resumen, que
+ *     incluye el **tiempo estimado** y la **dependencia con el frontal**, y **lo aprueba el
+ *     propietario**.
+ *  3. Aprobado, el vigilante aparta el tiempo en la agenda del propietario, en el primer
+ *     hueco libre y nunca encimado con otra petición. Si el frontal tiene que implementar
+ *     algo, crea la subtarea en Redmine y agenda la sesión con esa persona.
+ *  4. El agente puede dejar el trabajo listo de inmediato, pero **Redmine avanza con la
+ *     agenda**: «En curso» (con fecha fin y tiempo estimado) cuando empieza el bloque, y el
+ *     cierre cuando termina.
+ *  5. El supervisor (un modelo más fuerte) entra una vez, al final. Hay una ronda de
+ *     corrección y una segunda pasada; si no cumple, se le sube al propietario.
+ *  6. Cierre con Finalizar, Rechazar o Esperar. Con «Finalizar» el agente sube a main y el
+ *     vigilante publica el comentario por la API y pasa la petición a «Terminado por
+ *     Desarrollo», al terminar el bloque agendado (o antes, con «Publicar ya»).
  *
  * El vigilante avanza por la marca `Etapa:` con la que el agente cierra cada mensaje, no por
  * conteo de herramientas. Toda afirmación lleva su fuente (regla de evidencia).
  */
 
-export const DECISION = "Decisiones/2026-11-12-redmine-plan-lo-aprueba-el-propietario.md";
-export const DECISION_ENTREGA = "Decisiones/2026-11-12-redmine-acuse-alcance-y-entrega.md";
+export const DECISION = "Decisiones/2026-11-14-redmine-agenda-y-flujo-de-estados.md";
 
-/** Estado al que pasa la incidencia cuando el trabajo queda entregado y toca revisarlo del otro lado. */
-export const HANDOFF_STATUS = "Espera validación consultoría";
+/** Estado al que pasa una asignación recién tomada, mientras se analiza. */
+export const ANALYSIS_STATUS = "En análisis o en revisión";
+/** Estado al que pasa cuando empieza su bloque en la agenda. Redmine pide fecha fin y tiempo estimado. */
+export const START_STATUS = "En curso";
+/** Estado al que pasa cuando el trabajo queda entregado: después siguen Calidad y Consultoría. */
+export const HANDOFF_STATUS = "Terminado por Desarrollo";
+/** Estados «nuestros»: desde ellos una respuesta a un comentario devuelve la petición a entregada. */
+export const OURS_STATUSES = ["Nuevo o Pendiente", ANALYSIS_STATUS, START_STATUS, "Comentarios o no aprobado"];
 
 // ---------- acuse de recibo ----------
 
@@ -37,40 +45,56 @@ export function greeting(hour: number) {
 }
 
 /**
- * Catálogo de acuses: mismo fondo (ya lo tomé, te aviso por aquí), distinta forma, para que
- * no se lea siempre el mismo mensaje. `{n}` es el nombre con espacio delante (o nada) y
- * `{s}` el saludo.
+ * Catálogo de acuses al tomar la petición (pasa a análisis): mismo fondo (ya lo tengo, trabajaré
+ * en ello), distinta forma, para que no se lea siempre el mismo mensaje. `{n}` es el nombre con
+ * espacio delante (o nada) y `{s}` el saludo.
  */
 export const ACK_CATALOG = [
-  "Hola{n}, {s}. Tomo la asignación y trabajo en ello; en cuanto tenga el diagnóstico te comento por aquí.",
-  "Hola{n}, ya lo estoy revisando. Te aviso por este medio en cuanto tenga algo.",
-  "Hola{n}, {s}. Recibido, lo reviso y te comento por aquí.",
-  "{S}{n}. Ya tengo la solicitud y empiezo a revisarla; cualquier avance te lo dejo en este ticket.",
-  "Hola{n}, {s}. Lo tomo y me pongo con ello; te escribo por aquí con lo que encuentre.",
-  "Hola{n}, enterado. Lo estoy revisando y te confirmo por aquí en cuanto lo tenga claro.",
-  "{S}{n}. Ya quedó asignado conmigo; lo reviso y te mantengo al tanto por este medio.",
-  "Hola{n}, {s}. Ya lo tengo en revisión; en cuanto tenga el diagnóstico te lo comparto aquí.",
-  "Hola{n}, recibido. Empiezo con la revisión y te comento por aquí lo que vaya saliendo.",
-  "{S}{n}. Lo reviso ahora y te dejo por aquí el resultado.",
+  "Hola{n}, trabajaré en ello.",
+  "Hola{n}, {s}. Ya lo tengo; lo analizo y te comento por aquí.",
+  "Hola{n}, recibido. Me pongo a revisarlo.",
+  "{S}{n}. Lo reviso y te aviso por este medio.",
+  "Hola{n}, enterado. Lo analizo y te digo cómo queda.",
+  "Hola{n}, {s}. Lo tomo; primero lo analizo y te confirmo tiempos por aquí.",
+  "Hola{n}, ya lo vi. Trabajaré en ello y te mantengo al tanto.",
+  "{S}{n}. Recibido, empiezo con el análisis.",
+  "Hola{n}, cuenta con ello. Lo reviso y te escribo por aquí.",
+  "Hola{n}, {s}. Queda conmigo; lo analizo y te comento.",
 ] as const;
 
-/**
- * Acuse que el vigilante publica al tomar la incidencia. Elige una frase del catálogo al
- * azar sin repetir la última que se usó con esa persona; devuelve también el índice para
- * recordarlo.
- */
-export function ackComment(authorName: string, opts: { last?: number; random?: () => number; hour?: number } = {}) {
+/** Catálogo de avisos al pasar a «En curso»: ya empecé a trabajarlo. */
+export const START_CATALOG = [
+  "Hola{n}, ya estoy trabajando en ello.",
+  "Hola{n}, {s}. Empiezo con esto; te aviso por aquí en cuanto quede.",
+  "{S}{n}. Ya lo estoy trabajando.",
+  "Hola{n}, arranco con esta petición. Cualquier avance te lo dejo aquí.",
+  "Hola{n}, {s}. Ya me puse con ello.",
+  "Hola{n}, manos a la obra con esto; te comento por aquí al terminar.",
+  "{S}{n}. Comienzo a trabajarlo ahora.",
+  "Hola{n}, ya está en curso de mi lado. Te aviso cuando esté listo.",
+] as const;
+
+type PhraseOptions = { last?: number; random?: () => number; hour?: number };
+
+/** Frase de un catálogo al azar, sin repetir la última que recibió esa persona; devuelve también su índice. */
+function phrase(catalog: readonly string[], authorName: string, opts: PhraseOptions = {}) {
   const name = (authorName || "").trim().split(/\s+/)[0] ?? "";
   const random = opts.random ?? Math.random;
-  const choices = ACK_CATALOG.map((_, i) => i).filter((i) => i !== opts.last);
+  const choices = catalog.map((_, i) => i).filter((i) => i !== opts.last);
   const index = choices[Math.min(choices.length - 1, Math.floor(random() * choices.length))]!;
   const s = greeting(opts.hour ?? mexicoHour());
-  const text = ACK_CATALOG[index]!
+  const text = catalog[index]!
     .replace("{n}", name ? ` ${name}` : "")
     .replace("{s}", s)
     .replace("{S}", s[0]!.toUpperCase() + s.slice(1));
   return { index, text: `${text} 🐼` };
 }
+
+/** Acuse que el vigilante publica al tomar la petición, junto al paso a análisis. */
+export const ackComment = (authorName: string, opts: PhraseOptions = {}) => phrase(ACK_CATALOG, authorName, opts);
+
+/** Aviso que el vigilante publica al pasar la petición a «En curso». */
+export const startComment = (authorName: string, opts: PhraseOptions = {}) => phrase(START_CATALOG, authorName, opts);
 
 export function mexicoHour(now = new Date()) {
   return Number(new Intl.DateTimeFormat("en-GB", { timeZone: "America/Mexico_City", hour: "2-digit", hour12: false }).format(now)) % 24;
@@ -136,7 +160,8 @@ export function operatingRules() {
     "- Lo que no es nuestro (el frontal, otro equipo, un tercero o el cliente) no se implementa ni se propone implementar: va en el comentario como pendiente de su lado.",
     "- Me preguntas dos veces, y solo dos: al presentar el plan (lo apruebo yo) y en el cierre (Finalizar, Rechazar o Esperar). Entre el plan aprobado y el cierre trabajas sin pedirme permiso.",
     "- Sin mi aprobación del plan no implementas. Sin mi «Finalizar» no hay push ni merge a `main`/`production`, ni despliegue, ni escrituras en datos de ningún ambiente.",
-    "- **El comentario en Redmine no lo publicas tú**: lo publica el vigilante por la API cuando finalizo. Tú solo dejas la vista previa. Tampoco cambias el estado ni la asignación.",
+    "- **Redmine avanza con mi agenda, no con tu velocidad.** Con el plan aprobado el vigilante aparta el tiempo en mi agenda; la petición pasa a «En curso» cuando empieza ese bloque y el cierre se publica cuando termina. Tú puedes dejar el trabajo listo antes: no pasa nada, simplemente no se publica todavía. No prometas fechas en el comentario.",
+    "- **El comentario en Redmine no lo publicas tú**: lo publica el vigilante por la API cuando finalizo. Tú solo dejas la vista previa. Tampoco cambias el estado, la asignación, la fecha fin ni el tiempo estimado, ni creas subtareas: todo eso lo hace el vigilante.",
     "- Incidencia ya cerrada (Resuelta, Cerrada): no prepares nada; dímelo en una línea.",
   ].join("\n");
 }
@@ -154,13 +179,22 @@ export function commentStyle(author: string) {
   ].join("\n");
 }
 
-/** Las cuatro líneas con las que termina el plan: lo que el propietario lee para aprobar. */
+/** Las líneas con las que termina el plan: lo que el propietario lee para aprobar y lo que el vigilante agenda. */
 export const PLAN_SUMMARY = [
   "**Resumen del plan**",
   "- **Qué pidieron:** … (una o dos líneas, con sus palabras)",
   "- **Qué cambiamos nosotros:** … (qué se toca, en llano)",
   "- **Servicios afectados:** … (repos, lambdas, tablas; y a quién más puede pegarle según el grafo del Brain)",
   "- **Por qué es necesario:** … (una línea)",
+  "- **Tiempo estimado:** N h (horas de trabajo nuestro, en número: `2 h`, `3.5 h`; es lo que se aparta en mi agenda)",
+  "- **Dependencia frontal:** ninguna | Daniel o Gigdem — qué tiene que implementar el frontal, en una línea",
+].join("\n");
+
+/** Cómo llenar las dos líneas que el vigilante lee del resumen. */
+export const PLAN_FIELDS = [
+  "   Las dos últimas líneas las lee el vigilante, así que respeta su forma:",
+  "   - **Tiempo estimado**: tu mejor estimación honesta de las horas de trabajo nuestro (análisis ya hecho aparte), en número. Con ella se aparta el bloque en mi agenda y se llena el «Tiempo estimado» de Redmine.",
+  "   - **Dependencia frontal**: «ninguna» casi siempre. Solo nombra a Daniel o a Gigdem si el frontal **tiene que implementar algo** para que esto funcione (una pantalla, un consumo nuevo). Si solo necesitan enterarse, eso va en el README de siempre y aquí va «ninguna». Si nombras a alguien, al aprobar yo el plan el vigilante le crea la subtarea en Redmine y agenda la sesión con esa persona.",
 ].join("\n");
 
 /** Trabajo inicial: alcance, plan y, con el plan aprobado, ejecución. */
@@ -170,8 +204,9 @@ export function workRules(issueId: number | string, author: string, commentTool:
     `1. **Antecedentes y alcance.** Lee lo que el Brain ya tiene (abajo) y las sesiones previas (\`Solicitudes/**/poo-ia-*/Sesion.md\`). Decide de quién es el trabajo. Si el servicio, el dato o el código que hay que tocar **no** es de los nuestros (repos de \`capnet-workspace\`, nuestras lambdas, tablas y reportes), para ahí: dime en cinco líneas de quién es, con la evidencia, y el comentario de una o dos frases que yo pondría en Redmine. Cierra con \`Etapa: NO ES NUESTRO\`. Si después de investigar sigue dudoso, trátalo como ajeno y di qué falta para saberlo.`,
     "2. **Plan.** Si es nuestro: diagnóstico con evidencia y el plan más simple que resuelve lo pedido. No implementes todavía. Termina el mensaje con este bloque, tal cual y corto:",
     PLAN_SUMMARY,
+    PLAN_FIELDS,
     "   Después pregúntame con la herramienta `question` (una pregunta, opciones «Aprobar» y «Ajustar») y cierra con `Etapa: PLAN`. Si la herramienta no está, termina con la pregunta «¿Apruebo el plan?».",
-    "3. **Ejecución**, solo cuando lo apruebe (con el botón o escribiendo «sí», «dale», «aprobado»). Si pido ajustes, corrige el plan y vuelve a presentarlo con su resumen. Aprobado: rama nueva desde `main`, implementación, y **las pruebas de punta a punta del workflow** (las mismas que garantizan que se cumple lo pedido; no solo unitarias) con su salida real. Verifica en dev en solo lectura y actualiza el Brain.",
+    "3. **Ejecución**, solo cuando lo apruebe (con el botón o escribiendo «sí», «dale», «aprobado»). Si pido ajustes, corrige el plan y vuelve a presentarlo con su resumen. Aprobado (el vigilante aparta entonces el tiempo en mi agenda; tú sigue sin esperar a esa hora): rama nueva desde `main`, implementación, y **las pruebas de punta a punta del workflow** (las mismas que garantizan que se cumple lo pedido; no solo unitarias) con su salida real. Verifica en dev en solo lectura y actualiza el Brain.",
     `4. **Vista previa del comentario.** Guarda el comentario de cierre en un archivo y ejecuta desde tu carpeta de trabajo \`python3 ${commentTool} ${issueId} --notas-archivo <archivo> [--adjunto <ruta>]... --vista-previa\`. Eso no publica nada: deja la captura en \`capturas/\` y avisa al vigilante. Muéstrame el texto exacto.`,
     commentStyle(author),
     "5. Cierra con un mensaje corto —**Hecho** (qué quedó y cómo se probó, con la salida de las pruebas) y **Falta** (de nuestro lado / de su lado)— y la línea `Etapa: EJECUTADO`. No me preguntes nada ahí: entra el supervisor y después te pido el cierre.",
@@ -187,7 +222,7 @@ export function clarifyRules(issueId: number | string, commentTool: string) {
     "1. Di en una línea qué piden: aclarar algo, un dato, que algo no quedó bien, o trabajo nuevo. Si no piden nada —un «gracias», un «ok», un acuse—, dilo en una línea y cierra con `Etapa: SIN RESPUESTA`: sin vista previa y sin trabajo. No se responde por responder.",
     "2. Busca la respuesta en lo que ya hay: esta conversación, la documentación de esta incidencia en el Brain y el estado real (código desplegado, datos, logs). Comprueba lo necesario para contestar sin inventar.",
     `3. Si solo hay que aclarar: deja la respuesta como vista previa (\`python3 ${commentTool} ${issueId} --notas-archivo <archivo> --vista-previa\`), muéstrame el texto y cierra con \`Etapa: RESPUESTA\`. Entra el supervisor.`,
-    "4. Si de verdad es trabajo nuevo: no implementes. Preséntame el plan con su resumen de cuatro líneas (qué pidieron, qué cambiamos nosotros, servicios afectados, por qué es necesario), pregúntame con `question` («Aprobar» / «Ajustar») y cierra con `Etapa: PLAN`. Aprobado, ejecútalo como siempre y cierra con `Etapa: EJECUTADO`.",
+    "4. Si de verdad es trabajo nuevo: no implementes. Preséntame el plan con su resumen completo (qué pidieron, qué cambiamos nosotros, servicios afectados, por qué es necesario, tiempo estimado en horas y dependencia frontal), pregúntame con `question` («Aprobar» / «Ajustar») y cierra con `Etapa: PLAN`. Aprobado, ejecútalo como siempre y cierra con `Etapa: EJECUTADO`.",
     "No publiques en Redmine ni cambies el estado: lo hace el vigilante cuando yo finalice.",
     "",
     evidenceRules(),
@@ -327,7 +362,7 @@ function decisionRules(kind: ReviewKind) {
       : "- **Finalizar**: sube lo aprobado a `main` (push o merge del PR, y el despliegue que el workflow indique). Confirma en dos líneas qué subió, con el SHA, y cierra con `Etapa: DESPLEGADO`. Si no había nada que subir, `Etapa: SIN DESPLIEGUE`. Si algo impide subirlo, `Etapa: BLOQUEADO` con el error.",
     "- **Rechazar**: no subas nada; pregúntame qué corregir si no lo dije y cierra con `Etapa: RECHAZADO`. Cuando lo corrijas, vuelve a cerrar con la marca de trabajo terminado para que entre el supervisor.",
     "- **Esperar**: no hagas nada; cierra con `Etapa: EN ESPERA`. Cuando te diga que sigas, retomas desde esta misma pregunta.",
-    `**No publiques el comentario ni cambies el estado**: con tu marca de cierre el vigilante publica el comentario aprobado por la API y pasa la incidencia a «${HANDOFF_STATUS}».`,
+    `**No publiques el comentario ni cambies el estado**: con tu marca de cierre el vigilante publica el comentario aprobado por la API y pasa la incidencia a «${HANDOFF_STATUS}». Si todavía queda tiempo agendado para esta petición, lo hace al terminar ese bloque: es lo esperado, no lo reintentes ni lo publiques tú.`,
   ].join("\n");
 }
 
@@ -364,6 +399,25 @@ export function decisionFromQuestion(output: string): OwnerDecision | undefined 
   return undefined;
 }
 
+/** Respuesta a la pregunta del plan hecha con la herramienta `question`: «Aprobar» o «Ajustar». */
+export function planDecisionFromQuestion(output: string): "APROBAR" | "AJUSTAR" | undefined {
+  const answers = [...output.matchAll(/="([^"]*)"/g)].map((m) => m[1]!.trim());
+  for (const a of answers.reverse()) {
+    if (/^aprob/i.test(a)) return "APROBAR";
+    if (/^ajust/i.test(a)) return "AJUSTAR";
+  }
+  return undefined;
+}
+
+/** Lo que el propietario escribió a mano tras el plan: solo un sí claro lo aprueba. */
+export function planDecisionFromText(text: string): "APROBAR" | "AJUSTAR" | undefined {
+  const t = text.trim();
+  if (!t) return undefined;
+  if (/[?¿]/.test(t)) return undefined;
+  if (NO.test(t)) return "AJUSTAR";
+  return YES.test(t) ? "APROBAR" : undefined;
+}
+
 /** Lo que el propietario escribió a mano tras el cierre. Solo un sí claro cuenta como Finalizar. */
 export function decisionFromText(text: string): OwnerDecision | undefined {
   const t = text.trim();
@@ -376,7 +430,7 @@ export function decisionFromText(text: string): OwnerDecision | undefined {
   return undefined;
 }
 
-/** Las cuatro líneas del «Resumen del plan» de un mensaje del agente (lo que aprobó el propietario). */
+/** Las líneas del «Resumen del plan» de un mensaje del agente (lo que aprobó el propietario). */
 export function extractPlanSummary(text: string): string | undefined {
   const lines = text.split("\n");
   const start = lines.findLastIndex((l) => /resumen del plan/i.test(l));

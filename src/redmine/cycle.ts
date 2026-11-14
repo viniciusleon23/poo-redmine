@@ -7,8 +7,11 @@
  *  - EJECUTADO / RESPUESTA → entra el supervisor; según su veredicto, cierre, corrección o
  *    se le sube al propietario.
  *  - DESPLEGADO / SIN DESPLIEGUE → publica el comentario que aprobó el supervisor, solo si el
- *    propietario finalizó después del cierre y el texto no cambió.
- *  - las demás (PLAN, NO ES NUESTRO, EN ESPERA…) esperan al propietario: no se hace nada.
+ *    propietario finalizó después del cierre y el texto no cambió. Si a la petición le queda
+ *    tiempo agendado, la publicación espera a que termine ese bloque (`hold`).
+ *  - PLAN → espera al propietario; en cuanto lo aprueba, se aparta el tiempo en la agenda
+ *    (aunque el agente ya esté ejecutando).
+ *  - las demás (NO ES NUESTRO, EN ESPERA…) esperan al propietario: no se hace nada.
  */
 import { createHash } from "node:crypto";
 import type { OwnerDecision, ReviewKind, StageMark } from "./flow.ts";
@@ -27,6 +30,8 @@ import {
   noticePrompt,
   parseStage,
   parseVerdict,
+  planDecisionFromQuestion,
+  planDecisionFromText,
   publishedPrompt,
   reviewPrompt,
 } from "./flow.ts";
@@ -53,6 +58,26 @@ export type Linked = {
   clarify?: string;
   /** Resumen del plan que presentó el agente (lo que aprueba el propietario). */
   plan?: string;
+  /** Momento del mensaje que presentó ese plan. */
+  planAt?: number;
+  /** Desde cuándo los planes de esta conversación se llevan a la agenda (los anteriores al 14/11 no). */
+  agendaSince?: number;
+  /** Plan (`planAt`) que el propietario ya aprobó. */
+  planApproved?: number;
+  /** Plan ya llevado a la agenda: cuál (`planAt`), cuándo y qué quedó apartado. */
+  scheduled?: { planAt: number; at: number; summary: string };
+  /** Aprobado pero la agenda falló: se reintenta en cada sondeo. */
+  scheduleRetry?: boolean;
+  /** Actividad de la conversación ya revisada en busca de la aprobación del plan, con el agente ocupado. */
+  seenBusy?: string;
+  /** Cuándo pasó a «En curso» en Redmine (al empezar su bloque de la agenda). */
+  startedAt?: number;
+  /** Plan (`scheduled.planAt`) para el que ya se hizo el paso a «En curso»: no se repite. */
+  startedPlan?: number;
+  /** Subtareas y sesiones ya creadas para el frontal, por persona: no se repiten. */
+  front?: Record<string, { subtaskId?: number; sessions?: number; error?: string }>;
+  /** Cierre listo que espera al final del bloque agendado para publicarse. */
+  hold?: { mark: StageMark; until?: number; since: number };
   /** Momento del mensaje con la última marca atendida: lo anterior ya no cuenta. */
   handledAt?: number;
   lastMark?: StageMark;
@@ -94,7 +119,11 @@ export interface CycleDeps {
   /** Vista previa del comentario posterior a `since`, si la hay. */
   readPreview(issueId: string, since: number): Approved | undefined;
   /** Publica el comentario aprobado; devuelve el resultado en una línea. */
-  publish(issueId: string, approved: Approved, directory: string): Promise<string>;
+  publish(issueId: string, approved: Approved, directory: string, kind: ReviewKind): Promise<string>;
+  /** Plan aprobado: aparta el tiempo en la agenda (y lo del frontal). Devuelve qué quedó, en una línea. */
+  schedule?(issueId: string, linked: Linked): Promise<string>;
+  /** ¿La publicación del cierre debe esperar al final del bloque agendado? */
+  publishGate?(issueId: string): { wait: boolean; until?: number };
   save(): void;
   log(line: string): void;
   now(): number;
@@ -119,6 +148,24 @@ export function ownerDecision(snap: Snapshot, since: number): OwnerDecision | un
     } else if (m.role === "user") {
       const text = textOf(m);
       if (!isWatcherText(text)) consider(m.createdAt, decisionFromText(text));
+    }
+  }
+  return latest?.decision;
+}
+
+/** Lo que el propietario decidió sobre el plan presentado en `since`: el botón de la pregunta o lo que escribió. */
+export function planDecision(snap: Snapshot, since: number): "APROBAR" | "AJUSTAR" | undefined {
+  let latest: { at: number; decision: "APROBAR" | "AJUSTAR" } | undefined;
+  const consider = (at: number, decision: "APROBAR" | "AJUSTAR" | undefined) => {
+    if (decision && at >= since && (!latest || at >= latest.at)) latest = { at, decision };
+  };
+  for (const m of snap.messages) {
+    if (m.role === "assistant") {
+      for (const p of m.parts)
+        if (p.kind === "tool" && p.tool === "question" && p.status === "completed") consider(m.completedAt ?? m.createdAt, planDecisionFromQuestion(p.output ?? ""));
+    } else if (m.role === "user" && m.createdAt > since) {
+      const text = textOf(m);
+      if (!isWatcherText(text)) consider(m.createdAt, planDecisionFromText(text));
     }
   }
   return latest?.decision;
@@ -154,8 +201,17 @@ export function createCycle(deps: CycleDeps) {
     const current = deps.readPreview(issueId, Date.parse(linked.linkedAt));
     if (current && current.hash !== approved.hash)
       return notice("el comentario de la vista previa cambió después de la supervisión, así que no publiqué nada. Cierra con `Etapa: EJECUTADO` (o `Etapa: RESPUESTA`) para que el supervisor revise el texto nuevo.");
+    const kind: ReviewKind = linked.kind ?? "trabajo";
+    // El trabajo puede estar listo antes de su hora: Redmine lo ve al terminar el bloque agendado.
+    const gate = kind === "trabajo" ? deps.publishGate?.(issueId) : undefined;
+    if (gate?.wait) {
+      if (!linked.hold) log(`#${issueId}: ${mark} con «Finalizar» del propietario; la publicación espera al final del bloque agendado (${gate.until ? new Date(gate.until).toISOString() : "sin hora"})`);
+      linked.hold = { mark, until: gate.until, since: linked.hold?.since ?? deps.now() };
+      return;
+    }
+    linked.hold = undefined;
     try {
-      const result = await deps.publish(issueId, approved, snap.task.directory);
+      const result = await deps.publish(issueId, approved, snap.task.directory, kind);
       linked.published = { hash: approved.hash, at: deps.now(), result };
       linked.pending = { prompt: publishedPrompt(issueId, result) };
       log(`#${issueId}: ${mark} con «Finalizar» del propietario → comentario publicado por la API (${result})`);
@@ -165,13 +221,44 @@ export function createCycle(deps: CycleDeps) {
     }
   }
 
+  /** Plan presentado y aún sin agendar: si el propietario ya lo aprobó, se aparta el tiempo. */
+  const unscheduled = (linked: Linked) =>
+    Boolean(deps.schedule && linked.planAt && linked.agendaSince !== undefined && linked.planAt >= linked.agendaSince && linked.scheduled?.planAt !== linked.planAt);
+
+  async function scheduleIfApproved(issueId: string, linked: Linked, snap: Snapshot, implied = false) {
+    if (!unscheduled(linked)) return;
+    const planAt = linked.planAt!;
+    if (!implied && linked.planApproved !== planAt && planDecision(snap, planAt) !== "APROBAR") return;
+    linked.planApproved = planAt;
+    try {
+      const summary = await deps.schedule!(issueId, linked);
+      linked.scheduled = { planAt, at: deps.now(), summary };
+      linked.scheduleRetry = undefined;
+      log(`#${issueId}: plan aprobado → ${summary}`);
+    } catch (err) {
+      if (!linked.scheduleRetry) log(`#${issueId}: plan aprobado pero no pude agendarlo (${errorText(err)}); reintento en cada sondeo`);
+      linked.scheduleRetry = true;
+    }
+  }
+
   /** Avanza la conversación de una incidencia cuando está en pausa. */
   async function cycle(issueId: string, linked: Linked) {
     if (!linked.taskId) return;
     const taskId = linked.taskId;
     const seen = (await deps.conversations()).get(taskId);
-    if (!seen || isBusy(seen.status)) return;
-    const waiting = Boolean(linked.review || linked.pending || linked.outbox?.length);
+    if (!seen) return;
+    if (isBusy(seen.status)) {
+      // Al aprobar, el agente se pone a ejecutar de inmediato: la aprobación se mira aunque esté ocupado.
+      if (unscheduled(linked) && linked.seenBusy !== seen.signature) {
+        linked.seenBusy = seen.signature;
+        await scheduleIfApproved(issueId, linked, await deps.task(taskId));
+        save();
+      }
+      return;
+    }
+    // Un cierre en espera se revisa en cada sondeo, pero sin pedir el historial hasta que toque publicar.
+    const holdReady = Boolean(linked.hold) && !deps.publishGate?.(issueId).wait;
+    const waiting = Boolean(linked.review || linked.pending || linked.outbox?.length || holdReady || (linked.scheduleRetry && unscheduled(linked)));
     if (!waiting && linked.seenActivity === seen.signature) return;
     const snap = await deps.task(taskId);
     if (isBusy(snap.task.status)) return;
@@ -234,9 +321,22 @@ export function createCycle(deps: CycleDeps) {
       resetCycle(linked);
     }
 
-    // El resumen del plan que aprobó el propietario, para el supervisor: el último que presentó el agente.
-    const plan = assistants.map((m) => extractPlanSummary(textOf(m))).filter(Boolean).pop();
-    if (plan) linked.plan = plan;
+    // El resumen del plan que aprobó el propietario, para el supervisor y la agenda: el último que presentó el agente.
+    const planned = assistants.map((m) => ({ at: m.createdAt, plan: extractPlanSummary(textOf(m)) })).filter((x) => x.plan).pop();
+    if (planned) {
+      linked.plan = planned.plan;
+      linked.planAt = planned.at;
+    }
+    await scheduleIfApproved(issueId, linked, snap);
+
+    // 3b. Cierre que esperaba al final de su bloque: ya puede publicarse.
+    if (linked.hold && holdReady) {
+      const held = linked.hold.mark;
+      await publishIfFinal(issueId, linked, snap, held);
+      linked.seenActivity = undefined;
+      save();
+      return;
+    }
 
     // 4. La marca con la que el agente cerró su último mensaje.
     const since = linked.handledAt ?? Date.parse(linked.linkedAt);
@@ -256,6 +356,10 @@ export function createCycle(deps: CycleDeps) {
       return;
     }
     const mark = marked.mark!;
+    // Una marca nueva deja atrás el cierre que esperaba (p. ej. el propietario lo rechazó después).
+    if (!PUBLISHES.has(mark)) linked.hold = undefined;
+    // Si el agente ya ejecutó, el plan estaba aprobado aunque no se haya visto el botón.
+    if (mark === "EJECUTADO") await scheduleIfApproved(issueId, linked, snap, true);
 
     if (NEEDS_REVIEW.has(mark)) {
       const kind: ReviewKind = mark === "RESPUESTA" ? "respuesta" : "trabajo";

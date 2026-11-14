@@ -2,7 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   ACK_CATALOG,
+  ANALYSIS_STATUS,
   HANDOFF_STATUS,
+  PLAN_SUMMARY,
+  START_CATALOG,
+  START_STATUS,
   NEEDS_REVIEW,
   PUBLISHES,
   ackComment,
@@ -23,10 +27,13 @@ import {
   operatingRules,
   parseStage,
   parseVerdict,
+  planDecisionFromQuestion,
+  planDecisionFromText,
   publishedPrompt,
   reviewPrompt,
+  startComment,
   workRules,
-} from "../apps/redmine-watcher/src/flow.ts";
+} from "../src/redmine/flow.ts";
 
 const TOOL = "/x/redmine_comentar.py";
 
@@ -34,11 +41,11 @@ test("el acuse sale de un catálogo, con el nombre, el saludo de la hora y sin r
   assert.ok(ACK_CATALOG.length >= 8);
   const first = ackComment("Hugo Pérez", { random: () => 0, hour: 9 });
   assert.equal(first.index, 0);
-  assert.equal(first.text, "Hola Hugo, buen día. Tomo la asignación y trabajo en ello; en cuanto tenga el diagnóstico te comento por aquí. 🐼");
+  assert.equal(first.text, "Hola Hugo, trabajaré en ello. 🐼");
   // La misma tirada con la anterior ya usada cae en la siguiente frase.
   const second = ackComment("Hugo Pérez", { random: () => 0, hour: 9, last: 0 });
   assert.equal(second.index, 1);
-  assert.equal(second.text, "Hola Hugo, ya lo estoy revisando. Te aviso por este medio en cuanto tenga algo. 🐼");
+  assert.equal(second.text, "Hola Hugo, buen día. Ya lo tengo; lo analizo y te comento por aquí. 🐼");
   for (let last = 0; last < ACK_CATALOG.length; last++)
     for (const r of [0, 0.37, 0.999999]) assert.notEqual(ackComment("Ana", { random: () => r, last }).index, last);
   // Todas las frases quedan completas: sin marcadores sueltos, con el nombre y la firma.
@@ -49,7 +56,46 @@ test("el acuse sale de un catálogo, con el nombre, el saludo de la hora y sin r
     assert.match(text, /🐼$/);
   }
   assert.match(ackComment("Hugo", { random: () => 3 / ACK_CATALOG.length, hour: 15 }).text, /^Buenas tardes Hugo\. /);
-  assert.equal(ackComment("", { random: () => 0, hour: 9 }).text.startsWith("Hola, buen día."), true);
+  assert.equal(ackComment("", { random: () => 0, hour: 9 }).text, "Hola, trabajaré en ello. 🐼");
+});
+
+test("al pasar a «En curso» el aviso sale de su propio catálogo, también sin repetir el último", () => {
+  assert.ok(START_CATALOG.length >= 6);
+  assert.equal(startComment("Catalina P.", { random: () => 0, hour: 10 }).text, "Hola Catalina, ya estoy trabajando en ello. 🐼");
+  assert.equal(startComment("Catalina P.", { random: () => 0, hour: 16, last: 0 }).text, "Hola Catalina, buenas tardes. Empiezo con esto; te aviso por aquí en cuanto quede. 🐼");
+  for (let last = 0; last < START_CATALOG.length; last++)
+    for (const r of [0, 0.5, 0.999999]) assert.notEqual(startComment("Ana", { random: () => r, last }).index, last);
+  for (let i = 0; i < START_CATALOG.length; i++) {
+    const { text } = startComment("Ana", { random: () => i / START_CATALOG.length, hour: 9 });
+    assert.doesNotMatch(text, /[{}]/);
+    assert.match(text, /Ana/);
+    assert.match(text, /🐼$/);
+  }
+  // Ninguna frase de inicio se confunde con las del acuse.
+  for (const text of START_CATALOG) assert.equal((ACK_CATALOG as readonly string[]).includes(text), false);
+});
+
+test("los estados siguen el flujo del equipo: análisis, en curso y terminado por desarrollo", () => {
+  assert.equal(ANALYSIS_STATUS, "En análisis o en revisión");
+  assert.equal(START_STATUS, "En curso");
+  assert.equal(HANDOFF_STATUS, "Terminado por Desarrollo");
+});
+
+test("el plan pide tiempo estimado y dependencia frontal, y su aprobación se lee del botón o del texto", () => {
+  assert.match(PLAN_SUMMARY, /\*\*Tiempo estimado:\*\*/);
+  assert.match(PLAN_SUMMARY, /\*\*Dependencia frontal:\*\*/);
+  const rules = workRules(39030, "Catalina P.", TOOL);
+  assert.match(rules, /Tiempo estimado/);
+  assert.match(rules, /ninguna/);
+  assert.match(operatingRules(), /Redmine avanza con mi agenda/);
+  assert.equal(planDecisionFromQuestion('User has answered your questions: "¿Apruebo el plan?"="Aprobar". You can now continue.'), "APROBAR");
+  assert.equal(planDecisionFromQuestion('User has answered your questions: "¿Apruebo el plan?"="Ajustar".'), "AJUSTAR");
+  assert.equal(planDecisionFromQuestion('User has answered your questions: "¿Finalizo #1?"="Finalizar".'), undefined);
+  assert.equal(planDecisionFromText("sí, dale"), "APROBAR");
+  assert.equal(planDecisionFromText("aprobado"), "APROBAR");
+  assert.equal(planDecisionFromText("ajusta el tiempo, son 2 horas"), "AJUSTAR");
+  assert.equal(planDecisionFromText("¿cuánto tarda?"), undefined);
+  assert.equal(planDecisionFromText("revisa también la tabla de citas"), undefined);
 });
 
 test("el saludo sigue la hora de México", () => {
