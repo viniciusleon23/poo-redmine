@@ -661,7 +661,8 @@ function issueCards(): IssueCard[] {
         sessions: f.sessions,
         error: f.error,
       })),
-      canPlan: !work && !(linked.published && linked.lastMark === "CERRADO"),
+      // Solo lo que sigue de nuestro lado: una petición ya entregada (Calidad, Consultoría) no se agenda.
+      canPlan: !work && OURS_STATUSES.some((n) => same(n, issue.status.name)),
     });
   }
   return cards.sort((a, b) => (a.work?.start ?? Infinity) - (b.work?.start ?? Infinity) || a.issueId - b.issueId);
