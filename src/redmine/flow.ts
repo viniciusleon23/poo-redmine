@@ -138,6 +138,7 @@ const MARK_RULES = [
   "- `Etapa: PLAN` — presentaste el plan y esperas mi aprobación.",
   "- `Etapa: EJECUTADO` — implementado y probado de punta a punta, con la vista previa del comentario lista. Entra el supervisor.",
   "- `Etapa: BLOQUEADO` — falta algo que solo yo o un tercero resolvemos; di qué, en una línea.",
+  "- `Etapa: EN ESPERA` — yo te pedí pausarla o no trabajarla todavía; no hagas nada más hasta que te diga.",
 ].join("\n");
 
 /** Lo que vale para todo lo que el agente afirme: en el plan, en el cierre y en el comentario. */
@@ -182,10 +183,13 @@ export function commentStyle(author: string) {
 /** Las líneas con las que termina el plan: lo que el propietario lee para aprobar y lo que el vigilante agenda. */
 export const PLAN_SUMMARY = [
   "**Resumen del plan**",
+  "- **En una frase:** <quien la pide> pide … (una sola línea, llana; es lo que leo de un vistazo en mi agenda)",
   "- **Qué pidieron:** … (una o dos líneas, con sus palabras)",
   "- **Qué cambiamos nosotros:** … (qué se toca, en llano)",
   "- **Servicios afectados:** … (repos, lambdas, tablas; y a quién más puede pegarle según el grafo del Brain)",
   "- **Por qué es necesario:** … (una línea)",
+  "- **Se puede:** sí | parcial | no — por qué, en una línea (si es parcial o no, qué parte no y qué propones)",
+  "- **Tamaño del cambio:** bajo | medio | alto — por qué (bajo: no se toca código; medio: un servicio nuestro; alto: varios servicios, datos o el frontal)",
   "- **Tiempo estimado:** N h (horas de trabajo nuestro, en número: `2 h`, `3.5 h`; es lo que se aparta en mi agenda)",
   "- **Dependencia frontal:** ninguna | Daniel o Gigdem — qué tiene que implementar el frontal, en una línea",
 ].join("\n");
@@ -222,7 +226,7 @@ export function clarifyRules(issueId: number | string, commentTool: string) {
     "1. Di en una línea qué piden: aclarar algo, un dato, que algo no quedó bien, o trabajo nuevo. Si no piden nada —un «gracias», un «ok», un acuse—, dilo en una línea y cierra con `Etapa: SIN RESPUESTA`: sin vista previa y sin trabajo. No se responde por responder.",
     "2. Busca la respuesta en lo que ya hay: esta conversación, la documentación de esta incidencia en el Brain y el estado real (código desplegado, datos, logs). Comprueba lo necesario para contestar sin inventar.",
     `3. Si solo hay que aclarar: deja la respuesta como vista previa (\`python3 ${commentTool} ${issueId} --notas-archivo <archivo> --vista-previa\`), muéstrame el texto y cierra con \`Etapa: RESPUESTA\`. Entra el supervisor.`,
-    "4. Si de verdad es trabajo nuevo: no implementes. Preséntame el plan con su resumen completo (qué pidieron, qué cambiamos nosotros, servicios afectados, por qué es necesario, tiempo estimado en horas y dependencia frontal), pregúntame con `question` («Aprobar» / «Ajustar») y cierra con `Etapa: PLAN`. Aprobado, ejecútalo como siempre y cierra con `Etapa: EJECUTADO`.",
+    "4. Si de verdad es trabajo nuevo: no implementes. Preséntame el plan con su resumen completo (en una frase, qué pidieron, qué cambiamos nosotros, servicios afectados, por qué es necesario, si se puede, tamaño del cambio, tiempo estimado en horas y dependencia frontal), pregúntame con `question` («Aprobar» / «Ajustar») y cierra con `Etapa: PLAN`. Aprobado, ejecútalo como siempre y cierra con `Etapa: EJECUTADO`.",
     "No publiques en Redmine ni cambies el estado: lo hace el vigilante cuando yo finalice.",
     "",
     evidenceRules(),

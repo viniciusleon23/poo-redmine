@@ -49,6 +49,8 @@ src/agenda/api.ts        API de la Agenda (disponibilidad, bloques, sesiones)
 src/agenda/slots.ts      jornada, huecos y reparto en tramos (puro)
 src/agenda/planner.ts    actividades: apartar, mover, sincronizar, esperar para publicar
 src/agenda/http.ts       la agenda para la app y la web (loopback)
+src/agenda/cards.ts      de quién es el turno en cada petición (puro)
+src/agenda/story.ts      el plan en corto, el recorrido con fechas, a quién se espera y qué falta (puro)
 src/poo.ts               cliente mínimo de la pasarela de Poo IA
 bin/redmine_comentar.py  vista previa y publicación del comentario, sin duplicados
 bin/redmine_captura.cjs  capturas del comentario con Playwright

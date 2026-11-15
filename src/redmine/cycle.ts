@@ -35,6 +35,7 @@ import {
   publishedPrompt,
   reviewPrompt,
 } from "./flow.ts";
+import { storyOf } from "../agenda/story.ts";
 
 export type Approved = { hash: string; notes: string; attachments: string[]; at: number; capture?: string };
 export type Linked = {
@@ -101,6 +102,12 @@ export type Linked = {
   ownerSeenAt?: number;
   /** Ya se le recordó la marca en este ciclo. */
   nudged?: boolean;
+  /** Lo último que el propietario le dijo a Poo en la conversación (para la Agenda). */
+  ownerSaid?: { at: number; text: string };
+  /** «Falta» del último cierre del agente (para la Agenda). */
+  missing?: string;
+  /** Cuándo se leyó la conversación para lo anterior; sin él se lee una vez al arrancar. */
+  storyAt?: number;
 };
 
 export type Part = { kind: string; text?: string; tool?: string; status?: string; output?: string };
@@ -320,6 +327,11 @@ export function createCycle(deps: CycleDeps) {
       linked.ownerSeenAt = ownerAt;
       resetCycle(linked);
     }
+    // Para la Agenda: lo último que dijo el propietario y el «Falta» del último cierre.
+    const story = storyOf(snap);
+    if (story.ownerSaid) linked.ownerSaid = story.ownerSaid;
+    if (story.missing) linked.missing = story.missing;
+    linked.storyAt = deps.now();
 
     // El resumen del plan que aprobó el propietario, para el supervisor y la agenda: el último que presentó el agente.
     const planned = assistants.map((m) => ({ at: m.createdAt, plan: extractPlanSummary(textOf(m)) })).filter((x) => x.plan).pop();

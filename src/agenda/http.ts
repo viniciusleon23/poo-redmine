@@ -18,6 +18,7 @@ import type { CardState, Turn } from "./cards.ts";
 import { PlanError } from "./planner.ts";
 import type { AgendaItem, Planner } from "./planner.ts";
 import { dateKey, dayStart } from "./slots.ts";
+import type { HistoryEvent, PlanBrief } from "./story.ts";
 import type { WorkWeek } from "./slots.ts";
 
 export interface IssueCard {
@@ -35,6 +36,12 @@ export interface IssueCard {
   priority: string;
   author: string;
   dueDate?: string;
+  /** Cuándo se abrió la petición en Redmine. */
+  createdAt?: number;
+  /** Cuándo la tomó el vigilante (al asignársela al propietario). */
+  assignedAt?: number;
+  /** Último movimiento de la petición en Redmine. */
+  updatedAt?: number;
   /** Última marca `Etapa:` de la conversación. */
   stage?: string;
   estimateMinutes?: number;
@@ -45,6 +52,24 @@ export interface IssueCard {
   front: { name: string; subtaskId?: number; subtaskUrl?: string; sessions?: number; error?: string }[];
   /** Se le puede apartar tiempo a mano (no tiene bloque). */
   canPlan: boolean;
+  /** Lo que piden en una frase: la del plan o, sin plan, la primera de la descripción. */
+  brief?: string;
+  /** Lo que escribieron en la petición, tal cual. */
+  description?: string;
+  /** El plan en corto (agenda/story.ts) y cuándo se presentó. */
+  plan?: PlanBrief & { at?: number; front?: string[] };
+  /** Cuándo se apartó el tiempo (el plan ya estaba aprobado). */
+  scheduledAt?: number;
+  /** Cuándo cambió de estado por última vez; en las entregadas, cuándo salió de nuestro lado. */
+  statusAt?: number;
+  /** Lo que falta para cerrarla, según el último cierre del agente. */
+  missing?: string;
+  /** Lo último que el propietario le dijo a Poo. */
+  ownerSaid?: { at: number; text: string };
+  /** Pregunta o petición del propietario en Redmine que nadie ha contestado. */
+  asked?: { at: number; to: string[]; text: string };
+  /** Recorrido con fecha y hora. */
+  history: HistoryEvent[];
 }
 
 export interface AgendaView {

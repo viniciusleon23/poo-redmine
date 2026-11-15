@@ -26,6 +26,7 @@ export type CardState =
   | "supervision"
   | "lista" // cierre listo, espera su hora para publicarse
   // Espera a otra persona
+  | "respuesta" // preguntaste algo en Redmine y nadie ha contestado
   | "entregada";
 
 export interface CardInput {
@@ -45,6 +46,8 @@ export interface CardInput {
   /** Cierre listo que espera al final de su bloque. */
   hold: boolean;
   work?: { start: number; end: number };
+  /** El último comentario de Redmine es una pregunta o petición tuya sin respuesta. */
+  asked?: boolean;
   now: number;
 }
 
@@ -78,6 +81,7 @@ export function classify(input: CardInput): { turn: Turn; state: CardState; wait
   if (input.work && input.work.start <= input.now && input.now < input.work.end) return { turn: "poo", state: "en_bloque" };
   if (input.busy) return { turn: "poo", state: stage ? "trabajando" : "analisis" };
   if (input.work && input.work.start > input.now) return { turn: "poo", state: "agendada" };
+  if (input.asked) return { turn: "otros", state: "respuesta" };
   return { turn: "tu", state: "sin_avance" };
 }
 

@@ -26,6 +26,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgenda } from "./agenda/api.ts";
 import { byTurn, classify } from "./agenda/cards.ts";
+import { firstSentence, issueStory, ownerPaused, parsePlanBrief, storyOf } from "./agenda/story.ts";
+import type { HistoryEvent } from "./agenda/story.ts";
 import { startAgendaHttp } from "./agenda/http.ts";
 import type { IssueCard } from "./agenda/http.ts";
 import { PlanError, createPlanner, emptyState, parseEstimate, parseFront, sessionMinutes } from "./agenda/planner.ts";
@@ -184,6 +186,9 @@ function migrate() {
 
 /** Últimas incidencias abiertas vistas en el listado: lo que la agenda muestra de cada petición. */
 const known = new Map<string, Issue>();
+/** Detalle (con sus movimientos) de cada petición asignada, para el recorrido que muestra la Agenda. */
+const details = new Map<string, Issue>();
+let statusNames = new Map<string, string>();
 
 /**
  * Toma la incidencia: la pasa al estado de análisis si sigue en uno inicial y publica el
@@ -573,6 +578,35 @@ async function followClosed(open: Set<string>) {
   }
 }
 
+/**
+ * Para la Agenda: los movimientos de cada petición asignada (una lectura por petición, y otra
+ * solo cuando Redmine dice que cambió) y, una vez por conversación, lo último que dijo el
+ * propietario y el «Falta» del último cierre.
+ */
+async function refreshStories(issues: Issue[]) {
+  if (!statusNames.size) statusNames = new Map((await redmine.statuses()).map((s) => [String(s.id), s.name]));
+  for (const i of issues) {
+    const id = String(i.id);
+    if (details.get(id)?.updated_on === i.updated_on) continue;
+    const full = await redmine.detail(i.id).catch(() => undefined);
+    if (full) details.set(id, full);
+  }
+  for (const id of [...details.keys()]) if (!known.has(id)) details.delete(id);
+  let changed = false;
+  for (const i of issues) {
+    const linked = state.issues[i.id];
+    if (!linked?.taskId || linked.storyAt !== undefined) continue;
+    const snap = (await poo.task(linked.taskId).catch(() => undefined)) as unknown as Snapshot | undefined;
+    if (!snap) continue;
+    const story = storyOf(snap);
+    if (story.ownerSaid) linked.ownerSaid = story.ownerSaid;
+    if (story.missing) linked.missing = story.missing;
+    linked.storyAt = Date.now();
+    changed = true;
+  }
+  if (changed) save();
+}
+
 // ---------- ciclo ----------
 async function tick() {
   overview = undefined;
@@ -585,6 +619,7 @@ async function tick() {
   const issues = await redmine.assignedOpen();
   known.clear();
   for (const i of issues) known.set(String(i.id), i);
+  await refreshStories(issues).catch((err) => log(`agenda: no pude leer el recorrido de las peticiones (${errorText(err)})`));
   if (!state.baselined) {
     state.baselined = true;
     if (skipExisting) {
@@ -654,7 +689,17 @@ function issueCards(): IssueCard[] {
     const work = planner?.workPlan(id);
     const gate = linked?.hold ? planner?.gate(id) : undefined;
     const ours = OURS_STATUSES.some((n) => same(n, issue.status.name));
-    const stage = linked?.lastMark;
+    // Una pausa que pidió el propietario y que el agente cerró como «bloqueado» se cuenta como pausa.
+    const pausedByOwner = linked?.lastMark === "BLOQUEADO" && linked.ownerSaid && linked.handledAt && linked.ownerSaid.at < linked.handledAt && ownerPaused(linked.ownerSaid.text);
+    const stage = pausedByOwner ? "EN ESPERA" : linked?.lastMark;
+    const full = details.get(id);
+    const story = issueStory(full ?? issue, state.userId, (statusId) => statusNames.get(statusId));
+    const brief = linked?.plan ? parsePlanBrief(linked.plan) : undefined;
+    const history: HistoryEvent[] = [...story.history];
+    if (linked?.planAt) history.push({ at: linked.planAt, text: "Poo presentó el plan." });
+    if (linked?.scheduled) history.push({ at: linked.scheduled.at, text: `Poo apartó el tiempo: ${linked.scheduled.summary}.` });
+    if (linked?.ownerSaid) history.push({ at: linked.ownerSaid.at, text: `Le dijiste a Poo: «${linked.ownerSaid.text}»` });
+    history.sort((a, b) => a.at - b.at);
     const turn = classify({
       status: issue.status.name,
       ours,
@@ -665,6 +710,7 @@ function issueCards(): IssueCard[] {
       awaitingClose: Boolean(linked?.closeAt && !linked.review && !linked.pending && (stage === "EJECUTADO" || stage === "RESPUESTA")),
       hold: Boolean(linked?.hold),
       work,
+      asked: Boolean(story.asked),
       now,
     });
     cards.push({
@@ -677,6 +723,10 @@ function issueCards(): IssueCard[] {
       priority: issue.priority.name,
       author: issue.author.name,
       dueDate: issue.due_date ?? undefined,
+      createdAt: Date.parse(issue.created_on) || undefined,
+      // La asignación sale de los movimientos de Redmine; si no los hay, de cuándo la tomó el vigilante.
+      assignedAt: story.assignedAt ?? (linked && !linked.baseline ? Date.parse(linked.linkedAt) || undefined : undefined),
+      updatedAt: Date.parse(issue.updated_on) || undefined,
       stage,
       estimateMinutes: parseEstimate(linked?.plan ?? ""),
       work,
@@ -691,6 +741,15 @@ function issueCards(): IssueCard[] {
       })),
       // Solo lo que sigue de nuestro lado y tiene conversación: una petición ya entregada no se agenda.
       canPlan: !work && ours && Boolean(linked?.taskId),
+      brief: brief?.brief ?? firstSentence(full?.description ?? issue.description),
+      description: (full?.description ?? issue.description ?? "").replace(/\r/g, "").trim().slice(0, 4000) || undefined,
+      plan: brief && linked?.plan ? { ...brief, at: linked.planAt, front: parseFront(linked.plan, frontPeople).people.map((p) => p.name) } : undefined,
+      scheduledAt: linked?.scheduled?.at,
+      statusAt: story.statusAt,
+      missing: linked?.missing,
+      ownerSaid: linked?.ownerSaid,
+      asked: story.asked,
+      history,
     });
   }
   return cards.sort(byTurn);
