@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgenda } from "./agenda/api.ts";
+import { byTurn, classify } from "./agenda/cards.ts";
 import { startAgendaHttp } from "./agenda/http.ts";
 import type { IssueCard } from "./agenda/http.ts";
 import { PlanError, createPlanner, emptyState, parseEstimate, parseFront, sessionMinutes } from "./agenda/planner.ts";
@@ -349,11 +350,14 @@ async function openConversation(issue: Issue, pickup: string) {
 const isBusy = (status: string) => status === "running" || status === "queued";
 
 let overview: Overview | undefined;
+/** La última lectura de conversaciones, para decir en la Agenda si Poo está trabajando. */
+let lastOverview: Overview | undefined;
 /** Estado de todas las conversaciones en una sola lectura por sondeo: el historial de una solo se pide si cambió. */
 async function conversations(): Promise<Overview> {
   if (!overview) {
     const list = await poo.tasks();
     overview = new Map(list.map((t) => [t.id, { status: t.status, signature: `${t.status}|${t.lastActivityAt ?? ""}|${t.updatedAt ?? ""}` }]));
+    lastOverview = overview;
   }
   return overview;
 }
@@ -615,6 +619,8 @@ async function tick() {
     await attendLinked(i, linked);
   }
   await followClosed(new Set(issues.map((i) => String(i.id))));
+  // Para la Agenda: qué conversaciones tienen un turno en marcha ahora.
+  await conversations().catch(() => undefined);
 }
 
 /** La agenda manda: refleja lo que se movió allá y pasa a «En curso» lo que ya empezó. */
@@ -635,40 +641,59 @@ async function agendaTick() {
 
 // ---------- agenda para la app y la web ----------
 
-/** Lo que la app muestra de cada petición abierta con conversación. */
+/**
+ * Lo que la app muestra: **solo las peticiones abiertas asignadas a la cuenta del propietario**
+ * (el listado de Redmine ya viene filtrado por `assigned_to_id=me`), con de quién es el turno.
+ */
 function issueCards(): IssueCard[] {
   const cards: IssueCard[] = [];
+  const now = Date.now();
   for (const [id, issue] of known) {
+    if (issue.assigned_to && state.userId !== undefined && issue.assigned_to.id !== state.userId) continue;
     const linked = state.issues[id];
-    if (!linked?.taskId) continue;
     const work = planner?.workPlan(id);
-    const gate = linked.hold ? planner?.gate(id) : undefined;
+    const gate = linked?.hold ? planner?.gate(id) : undefined;
+    const ours = OURS_STATUSES.some((n) => same(n, issue.status.name));
+    const stage = linked?.lastMark;
+    const turn = classify({
+      status: issue.status.name,
+      ours,
+      hasConversation: Boolean(linked?.taskId),
+      busy: Boolean(linked?.taskId && isBusy(lastOverview?.get(linked.taskId)?.status ?? "idle")),
+      stage,
+      reviewing: Boolean(linked?.review),
+      awaitingClose: Boolean(linked?.closeAt && !linked.review && !linked.pending && (stage === "EJECUTADO" || stage === "RESPUESTA")),
+      hold: Boolean(linked?.hold),
+      work,
+      now,
+    });
     cards.push({
+      ...turn,
       issueId: issue.id,
       subject: issue.subject,
       url: redmine.issueUrl(issue.id),
-      taskId: linked.taskId,
+      taskId: linked?.taskId,
       status: issue.status.name,
       priority: issue.priority.name,
       author: issue.author.name,
       dueDate: issue.due_date ?? undefined,
-      stage: linked.lastMark,
-      estimateMinutes: parseEstimate(linked.plan ?? ""),
+      stage,
+      estimateMinutes: parseEstimate(linked?.plan ?? ""),
       work,
-      startedAt: linked.startedAt,
-      hold: linked.hold ? { until: gate?.until ?? linked.hold.until } : undefined,
-      front: Object.entries(linked.front ?? {}).map(([key, f]) => ({
+      startedAt: linked?.startedAt,
+      hold: linked?.hold ? { until: gate?.until ?? linked.hold.until } : undefined,
+      front: Object.entries(linked?.front ?? {}).map(([key, f]) => ({
         name: frontPeople.find((p) => p.key === key)?.name ?? key,
         subtaskId: f.subtaskId,
         subtaskUrl: f.subtaskId ? redmine.issueUrl(f.subtaskId) : undefined,
         sessions: f.sessions,
         error: f.error,
       })),
-      // Solo lo que sigue de nuestro lado: una petición ya entregada (Calidad, Consultoría) no se agenda.
-      canPlan: !work && OURS_STATUSES.some((n) => same(n, issue.status.name)),
+      // Solo lo que sigue de nuestro lado y tiene conversación: una petición ya entregada no se agenda.
+      canPlan: !work && ours && Boolean(linked?.taskId),
     });
   }
-  return cards.sort((a, b) => (a.work?.start ?? Infinity) - (b.work?.start ?? Infinity) || a.issueId - b.issueId);
+  return cards.sort(byTurn);
 }
 
 function httpToken() {

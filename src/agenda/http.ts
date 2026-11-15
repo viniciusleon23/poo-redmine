@@ -14,12 +14,19 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { CardState, Turn } from "./cards.ts";
 import { PlanError } from "./planner.ts";
 import type { AgendaItem, Planner } from "./planner.ts";
 import { dateKey, dayStart } from "./slots.ts";
 import type { WorkWeek } from "./slots.ts";
 
 export interface IssueCard {
+  /** A quién le toca: al propietario, a Poo o a otra persona (agenda/cards.ts). */
+  turn: Turn;
+  /** Qué pasa con ella, en una clave que la app convierte en frase. */
+  state: CardState;
+  /** Quién la tiene cuando ya salió de nuestro lado («Consultoría», «Calidad»…). */
+  waitingOn?: string;
   issueId: number;
   subject: string;
   url: string;
