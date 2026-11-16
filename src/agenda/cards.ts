@@ -51,6 +51,15 @@ export interface CardInput {
   now: number;
 }
 
+/**
+ * ¿Poo está corrigiendo lo que observó el supervisor? Va de que termina una pasada con
+ * observaciones a que vuelve a entrar el supervisor o se pide el cierre. No cambia el turno ni el
+ * estado de la tarjeta: es un dato aparte para quien quiera mostrar la ronda de corrección.
+ */
+export function fixing(input: { fixes?: number; reviewing: boolean; closing: boolean }): boolean {
+  return (input.fixes ?? 0) > 0 && !input.reviewing && !input.closing;
+}
+
 /** Quién tiene la petición cuando ya salió de nuestro lado, según su estado en Redmine. */
 export function waitingOn(status: string): string {
   const s = status.trim().toLowerCase();

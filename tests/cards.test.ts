@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { byTurn, classify, waitingOn } from "../src/agenda/cards.ts";
+import { byTurn, classify, fixing, waitingOn } from "../src/agenda/cards.ts";
 import type { CardInput } from "../src/agenda/cards.ts";
 
 const NOW = 1_000_000;
@@ -62,4 +62,15 @@ test("el orden: primero lo que te toca, luego lo de Poo por hora de su bloque, a
     { turn: "poo" as const, issueId: 5 },
   ];
   assert.deepEqual(list.sort(byTurn).map((c) => c.issueId), [4, 9, 3, 2, 5, 1]);
+});
+
+test("ronda de corrección: de las observaciones del supervisor a su última pasada o al cierre", () => {
+  // El supervisor observó algo y Poo lo está arreglando.
+  assert.equal(fixing({ fixes: 1, reviewing: false, closing: false }), true);
+  // Sin observaciones no hay ronda.
+  assert.equal(fixing({ fixes: 0, reviewing: false, closing: false }), false);
+  assert.equal(fixing({ reviewing: false, closing: false }), false);
+  // El supervisor volvió a entrar, o ya se pidió el cierre: la ronda terminó.
+  assert.equal(fixing({ fixes: 1, reviewing: true, closing: false }), false);
+  assert.equal(fixing({ fixes: 1, reviewing: false, closing: true }), false);
 });

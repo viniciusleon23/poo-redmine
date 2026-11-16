@@ -28,6 +28,8 @@ export interface IssueCard {
   state: CardState;
   /** Quién la tiene cuando ya salió de nuestro lado («Consultoría», «Calidad»…). */
   waitingOn?: string;
+  /** Poo corrige lo que observó el supervisor (hay una sola ronda antes de su última pasada). */
+  fixing?: boolean;
   issueId: number;
   subject: string;
   url: string;
@@ -81,8 +83,18 @@ export interface AgendaView {
   workday: { start: number; end: number; days: number[] };
   syncedAt?: number;
   syncError?: string;
+  /** El vigilante de Redmine: cuándo leyó Redmine por última vez y cada cuánto lo hace. */
+  watch?: WatchBeat;
   items: AgendaItem[];
   issues: IssueCard[];
+}
+
+export interface WatchBeat {
+  /** Última lectura de Redmine que terminó bien. */
+  checkedAt?: number;
+  everyMs: number;
+  /** Por qué falló la última lectura, si falló. */
+  error?: string;
 }
 
 export interface AgendaHttpOptions {
@@ -95,6 +107,7 @@ export interface AgendaHttpOptions {
   now(): number;
   log(line: string): void;
   issues(): IssueCard[];
+  watch?(): WatchBeat;
   publishNow(issueId: number): Promise<void>;
   plan(issueId: number, minutes: number): Promise<void>;
 }
@@ -130,7 +143,7 @@ async function readBody(req: IncomingMessage, limit = 256 * 1024) {
 const STATUS: Record<PlanError["code"], number> = { sin_hueco: 409, ocupado: 409, no_movible: 409, no_encontrada: 404, datos: 400, agenda: 502 };
 
 /** Construye la vista de `days` días a partir de `from` (YYYY-MM-DD local). */
-export function buildView(options: Pick<AgendaHttpOptions, "planner" | "week" | "now" | "issues">, from: string | undefined, days: number): AgendaView {
+export function buildView(options: Pick<AgendaHttpOptions, "planner" | "week" | "now" | "issues" | "watch">, from: string | undefined, days: number): AgendaView {
   const { planner, week } = options;
   const now = options.now();
   const today = dateKey(now, week.timeZone);
@@ -146,6 +159,7 @@ export function buildView(options: Pick<AgendaHttpOptions, "planner" | "week" | 
     workday: { start: week.startMinute, end: week.endMinute, days: week.days },
     syncedAt: planner.state.syncedAt,
     syncError: planner.state.syncError,
+    watch: options.watch?.(),
     items: planner.view(start, start + span * 86_400_000),
     issues: options.issues(),
   };

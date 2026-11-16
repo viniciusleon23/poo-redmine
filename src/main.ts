@@ -25,7 +25,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgenda } from "./agenda/api.ts";
-import { byTurn, classify } from "./agenda/cards.ts";
+import { byTurn, classify, fixing } from "./agenda/cards.ts";
 import { firstSentence, issueStory, ownerPaused, parsePlanBrief, storyOf } from "./agenda/story.ts";
 import type { HistoryEvent } from "./agenda/story.ts";
 import { startAgendaHttp } from "./agenda/http.ts";
@@ -713,8 +713,16 @@ function issueCards(): IssueCard[] {
       asked: Boolean(story.asked),
       now,
     });
+    // Ronda de corrección: el supervisor observó algo y Poo lo arregla antes de su última pasada.
+    // Un cierre de un ciclo anterior (closeAt viejo) no cuenta: solo el posterior a la última supervisión.
+    const correcting = fixing({
+      fixes: linked?.fixes,
+      reviewing: Boolean(linked?.review),
+      closing: Boolean(linked?.pending?.close || (linked?.closeAt ?? 0) > (linked?.handledAt ?? 0)),
+    });
     cards.push({
       ...turn,
+      ...(correcting ? { fixing: true } : {}),
       issueId: issue.id,
       subject: issue.subject,
       url: redmine.issueUrl(issue.id),
@@ -776,6 +784,7 @@ function serveAgenda() {
     now: Date.now,
     log,
     issues: issueCards,
+    watch: () => ({ ...beat, everyMs: pollSeconds * 1000 }),
     /** «Publicar ya»: el cierre deja de esperar al final del bloque. */
     publishNow: async (issueId) => {
       const linked = state.issues[String(issueId)];
@@ -801,6 +810,9 @@ function serveAgenda() {
   log(`agenda servida en 127.0.0.1:${port} para la pasarela; zona ${week.timeZone}, jornada ${hhmm(week.startMinute)}–${hhmm(week.endMinute)}`);
 }
 
+/** Última lectura de Redmine: la Agenda lo sirve para que se vea que el vigilante sigue despierto. */
+const beat: { checkedAt?: number; error?: string } = {};
+
 async function main() {
   migrate();
   for (let wait = 5; ; wait = Math.min(wait * 2, 300)) {
@@ -818,7 +830,10 @@ async function main() {
   for (;;) {
     try {
       await tick();
+      beat.checkedAt = Date.now();
+      beat.error = undefined;
     } catch (err) {
+      beat.error = errorText(err);
       log(`error en el sondeo: ${errorText(err)}`);
     }
     try {
