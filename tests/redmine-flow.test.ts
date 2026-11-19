@@ -11,6 +11,7 @@ import {
   PUBLISHES,
   ackComment,
   afterReview,
+  agendaDecisionPrompt,
   clarifyRules,
   closePrompt,
   decisionFromQuestion,
@@ -21,6 +22,7 @@ import {
   fixPrompt,
   greeting,
   isWatcherText,
+  kickoffPrompt,
   mexicoHour,
   normalizeNotes,
   noticePrompt,
@@ -30,6 +32,7 @@ import {
   planDecisionFromQuestion,
   planDecisionFromText,
   publishedPrompt,
+  releasePrompt,
   reviewPrompt,
   startComment,
   workRules,
@@ -128,10 +131,13 @@ test("el trabajo inicial pide el plan con su resumen y que lo apruebe el propiet
   const rules = workRules(39015, "Hugo Pérez", TOOL);
   for (const piece of [
     "Qué pidieron", "Qué cambiamos nosotros", "Servicios afectados", "Por qué es necesario",
-    "herramienta `question`", "«Aprobar» y «Ajustar»", "Etapa: PLAN", "Etapa: NO ES NUESTRO", "Etapa: EJECUTADO",
+    "¿Apruebo el plan?", "Etapa: APROBADO", "no empieces a implementar", "README-front-<tema>.md", "Etapa: PLAN", "Etapa: NO ES NUESTRO", "Etapa: EJECUTADO",
     "pruebas de punta a punta del workflow", `python3 ${TOOL} 39015 --notas-archivo <archivo>`, "--vista-previa", "dirigido a Hugo",
   ]) assert.ok(rules.includes(piece), piece);
   assert.match(rules, /No implementes todavía/);
+  assert.match(rules, /No uses la herramienta `question`/, "una pregunta con herramienta deja el turno colgado sin que el propietario lo vea");
+  assert.match(rules, /Nunca menciones el README/);
+  assert.match(rules, /se compartirá la documentación/);
   const ops = operatingRules();
   assert.match(ops, /Sin mi aprobación del plan no implementas/);
   assert.match(ops, /El comentario en Redmine no lo publicas tú/);
@@ -195,21 +201,62 @@ test("el supervisor compara contra la solicitud y el plan aprobado, y revisa la 
   assert.doesNotMatch(answer, /Corre tú las pruebas/);
 });
 
-test("el cierre ofrece Finalizar, Rechazar o Esperar y deja la publicación al vigilante", () => {
+test("el cierre ofrece Finalizar, Rechazar o Esperar, publica en dev y producción y deja el comentario al vigilante", () => {
   for (const p of [closePrompt(7, "trabajo"), escalatePrompt(7, "trabajo", "observaciones"), closePrompt(7, "respuesta")]) {
     assert.ok(isWatcherText(p));
     assert.match(p, /«Finalizar», «Rechazar» y «Esperar»/);
-    assert.match(p, /herramienta `question`|con `question`/);
+    assert.match(p, /No uses la herramienta `question`/);
+    assert.match(p, /Etapa: CIERRE/);
     assert.match(p, /No publiques el comentario ni cambies el estado/);
     assert.ok(p.includes(HANDOFF_STATUS));
     for (const mark of ["Etapa: RECHAZADO", "Etapa: EN ESPERA", "Etapa: SIN DESPLIEGUE"]) assert.ok(p.includes(mark), mark);
   }
-  assert.match(closePrompt(7, "trabajo"), /Etapa: DESPLEGADO/);
-  assert.match(closePrompt(7, "trabajo"), /Qué sube a `main`/);
+  const work = closePrompt(7, "trabajo");
+  assert.match(work, /Etapa: DESPLEGADO/);
+  assert.match(work, /PR `main`→`production`/, "finalizar es subir a los dos ambientes");
+  assert.match(work, /Qué falta en producción además del código/);
+  assert.match(work, /README frontal/);
+  assert.doesNotMatch(work, /A su hora/, "sin bloque por delante no se ofrece esperar a su hora");
   assert.doesNotMatch(closePrompt(7, "respuesta"), /Etapa: DESPLEGADO/);
   assert.match(escalatePrompt(7, "trabajo", "sin-veredicto"), /no dejó un veredicto legible/);
   assert.match(fixPrompt(7, "trabajo"), /Etapa: EJECUTADO/);
   assert.match(fixPrompt(7, "respuesta"), /Etapa: RESPUESTA/);
+
+  // Listo antes de tiempo: se le recuerda la hora planificada y se ofrece publicar a su hora.
+  const early = closePrompt(7, "trabajo", { until: "15:00", now: "11:05" });
+  assert.match(early, /#7 estaba planificada para terminar a las 15:00 y son las 11:05\. ¿La publico ya o espero a las 15:00\?/);
+  assert.match(early, /«Finalizar» \(publicar ya\), «A su hora» \(publicar a las 15:00\), «Rechazar» y «Esperar»/);
+  assert.match(early, /Etapa: PROGRAMADO/);
+  assert.doesNotMatch(closePrompt(7, "respuesta", { until: "15:00", now: "11:05" }), /A su hora/, "una respuesta no espera bloque");
+
+  // El aviso de que llegó la hora y el de la Agenda piden lo mismo: los dos ambientes.
+  for (const p of [releasePrompt(7, "trabajo", "hora"), releasePrompt(7, "trabajo", "agenda")]) {
+    assert.ok(isWatcherText(p));
+    assert.match(p, /Dev\*\*: push y PR de cada rama a `main`/);
+    assert.match(p, /Producción\*\*: promueve/);
+    assert.match(p, /no termines el turno esperando un despliegue/);
+    assert.match(p, /Etapa: BLOQUEADO/);
+  }
+  assert.ok(isWatcherText(agendaDecisionPrompt(7, "rechazar", "falta X")));
+
+  // El arranque del bloque lleva el plan y las reglas completas (puede atenderlo otro modelo).
+  const kick = kickoffPrompt({ issueId: 7, author: "Hugo Pérez", commentTool: TOOL, plan: "- **Tiempo estimado:** 2 h", until: "15:00" });
+  assert.ok(isWatcherText(kick));
+  for (const piece of ["empezó el bloque de #7", "termina 15:00", "Tiempo estimado", "README-front-<tema>.md", "--vista-previa", "Etapa: EJECUTADO", "Avance:"]) assert.ok(kick.includes(piece), piece);
+});
+
+test("las marcas nuevas se leen y la decisión «a su hora» se distingue de esperar", () => {
+  assert.equal(parseStage("ok\n\nEtapa: APROBADO"), "APROBADO");
+  assert.equal(parseStage("ok\n\nEtapa: CIERRE"), "CIERRE");
+  assert.equal(parseStage("ok\n\nEtapa: PROGRAMADO"), "PROGRAMADO");
+  assert.equal(parseStage("ok\n\nEtapa: PLAN"), "PLAN");
+  assert.equal(decisionFromText("a su hora"), "PROGRAMAR");
+  assert.equal(decisionFromText("publícalo a las 3"), "PROGRAMAR");
+  assert.equal(decisionFromText("espera hasta las 15:00"), "PROGRAMAR");
+  assert.equal(decisionFromText("espera"), "ESPERAR");
+  assert.equal(decisionFromText("finaliza"), "FINALIZAR");
+  assert.equal(decisionFromQuestion('"¿Finalizo #7?"="A su hora (15:00)"'), "PROGRAMAR");
+  assert.equal(decisionFromQuestion('"¿Finalizo #7?"="Finalizar"'), "FINALIZAR");
 });
 
 test("los textos del vigilante y del daemon no se confunden con los del propietario", () => {

@@ -6,11 +6,16 @@
  *  1. Asignación nueva → «En análisis o en revisión» + acuse de catálogo → conversación de Poo IA.
  *  2. La conversación presenta el plan (con tiempo estimado y dependencia frontal); lo aprueba
  *     el propietario.
- *  3. Aprobado → se aparta el tiempo en la agenda; si hay dependencia frontal, subtarea en
- *     Redmine y sesión con esa persona.
- *  4. Empieza el bloque → «En curso» con fecha fin y tiempo estimado + aviso de catálogo.
- *  5. Supervisor, cierre con Finalizar/Rechazar/Esperar y, al terminar el bloque, comentario
- *     publicado por la API y petición en «Terminado por Desarrollo».
+ *  3. Aprobado → se aparta el tiempo en la agenda y la petición pasa a «En curso» con fecha fin
+ *     y tiempo estimado + aviso de catálogo; si hay dependencia frontal, subtarea en Redmine y
+ *     sesión con esa persona.
+ *  4. Empieza el bloque → arranque para el agente, con el modelo de trabajo.
+ *  5. Supervisor y cierre: el propietario decide Finalizar (publicar ya), A su hora, Rechazar o
+ *     Esperar. Publicar es todo: dev, producción y, entonces, el comentario por la API y la
+ *     petición en «Terminado por Desarrollo».
+ *
+ * Solo se atiende lo asignado a la cuenta configurada: los comentarios de peticiones que ya son
+ * de otra persona no se leen.
  *
  * Además sirve en loopback la agenda para la app y la web (agenda/http.ts; la pasarela la
  * reenvía con la sesión del propietario).
@@ -21,8 +26,8 @@
  */
 import { execFile } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgenda } from "./agenda/api.ts";
 import { byTurn, classify, fixing } from "./agenda/cards.ts";
@@ -37,8 +42,8 @@ import type { WorkWeek } from "./agenda/slots.ts";
 import { Poo } from "./poo.ts";
 import { createRedmine, fieldValue, lastJournalId, notesFromOthers } from "./redmine/api.ts";
 import type { Issue, Journal } from "./redmine/api.ts";
-import { createCycle, hashOf } from "./redmine/cycle.ts";
-import type { Approved, Linked, Overview, Snapshot } from "./redmine/cycle.ts";
+import { DecisionError, createCycle, hashOf } from "./redmine/cycle.ts";
+import type { AgendaDecision, Approved, Linked, Overview, Snapshot } from "./redmine/cycle.ts";
 import type { ReviewKind } from "./redmine/flow.ts";
 import {
   ANALYSIS_STATUS,
@@ -48,10 +53,13 @@ import {
   ackComment,
   clarifyRules,
   evidenceRules,
+  kickoffPrompt,
+  normalizeNotes,
   operatingRules,
   startComment,
   workRules,
 } from "./redmine/flow.ts";
+import type { CloseTiming } from "./redmine/flow.ts";
 
 const need = (name: string) => {
   const v = process.env[name];
@@ -74,7 +82,10 @@ if (!(pollSeconds >= 30)) throw new Error("REDMINE_POLL_SECONDS debe ser al meno
 const skipExisting = (process.env.REDMINE_SKIP_EXISTING ?? "1") === "1";
 const gateway = process.env.POO_GATEWAY ?? "http://127.0.0.1:4199";
 const passphrase = need("POO_PASSPHRASE");
+// Modelo de trabajo: con él se ejecuta el plan y se publica (toma las tareas).
 const model = process.env.POO_MODEL || undefined;
+// Modelo del análisis: alcance, plan y respuestas a comentarios. Sin él, todo va con el de trabajo.
+const analysisModel = process.env.REDMINE_ANALYSIS_MODEL || undefined;
 // Estado al que pasa una incidencia recién tomada, y desde cuáles (por nombre).
 const pickupStatus = process.env.REDMINE_PICKUP_STATUS ?? ANALYSIS_STATUS;
 const pickupFrom = (process.env.REDMINE_PICKUP_FROM ?? "Nuevo o Pendiente").split(",").map((v) => v.trim()).filter(Boolean);
@@ -345,9 +356,10 @@ const send = (taskId: string, text: string) => poo.prompt(taskId, text);
 
 async function openConversation(issue: Issue, pickup: string) {
   const antecedentes = await background(issue);
-  const created = await poo.createConversation(model);
-  // El trabajo empieza siempre con el modelo de trabajo; si la pasarela usó otro, se corrige.
-  if (model && created.model !== model) await poo.setModel(created.id, model);
+  const first = analysisModel ?? model;
+  const created = await poo.createConversation(first);
+  // El análisis empieza siempre con su modelo; si la pasarela usó otro, se corrige.
+  if (first && created.model !== first) await poo.setModel(created.id, first);
   await send(created.id, newIssuePrompt(issue, pickup, antecedentes));
   return created.id;
 }
@@ -372,6 +384,23 @@ async function conversations(): Promise<Overview> {
 const clock = (t: number) => new Intl.DateTimeFormat("es-MX", { timeZone: week.timeZone, weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(t);
 const span = (a: { start: number; end: number }) => `${clock(a.start)}–${new Intl.DateTimeFormat("es-MX", { timeZone: week.timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(a.end)}`;
 const duration = (minutes: number) => (minutes % 60 ? `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")} h` : `${minutes / 60} h`);
+const hour = (t: number) => new Intl.DateTimeFormat("es-MX", { timeZone: week.timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(t);
+/** «15:00» si es hoy; «jue 19 de nov, 10:00» si es otro día. */
+const hourOrDay = (t: number, now = Date.now()) => (dateKey(t, week.timeZone) === dateKey(now, week.timeZone) ? hour(t) : clock(t));
+
+/** Si a la petición le queda bloque por delante: a qué hora termina y qué hora es (para el recordatorio del cierre). */
+function closeTiming(issueId: string): CloseTiming {
+  const gate = planner?.gate(issueId);
+  if (!gate?.wait || !gate.until) return undefined;
+  return { until: hourOrDay(gate.until), now: hour(Date.now()) };
+}
+
+/** El arranque para el agente cuando empieza su bloque: el plan aprobado y cómo ejecutarlo. */
+async function kickoff(issueId: string, linked: Linked): Promise<string> {
+  const issue = known.get(issueId) ?? (await redmine.detail(Number(issueId)));
+  const work = planner?.workPlan(issueId);
+  return kickoffPrompt({ issueId, author: issue.author.name, commentTool, plan: linked.plan, until: work ? hourOrDay(work.end) : undefined });
+}
 
 /** Subtarea en Redmine y sesión en la agenda para quien del frontal nombra el plan. Una vez por persona. */
 async function involveFront(issue: Issue, linked: Linked, person: FrontPerson, detail: string, after: number): Promise<string> {
@@ -387,7 +416,7 @@ async function involveFront(issue: Issue, linked: Linked, person: FrontPerson, d
       if (matches.length !== 1) throw new Error(matches.length ? `hay ${matches.length} personas que empiezan por «${person.redmine}»` : `${person.name} no es miembro del proyecto ${issue.project.name}`);
       const sub = await redmine.createSubtask(issue, {
         subject: `Frontal: ${detail || issue.subject}`,
-        description: [detail || `Implementación del frontal para #${issue.id}.`, "", `Subtarea de #${issue.id} «${issue.subject}». La documentación para el frontal se comparte por README. 🐼`].join("\n"),
+        description: [detail || `Implementación del frontal para #${issue.id}.`, "", `Subtarea de #${issue.id} «${issue.subject}». Se compartirá la documentación. 🐼`].join("\n"),
         assigneeId: matches[0]!.id,
         trackerId: await redmine.trackerId(subtaskTracker),
       });
@@ -495,7 +524,7 @@ async function publish(issueId: string, approved: Approved, directory: string, k
   return result;
 }
 
-const { cycle, resetCycle } = createCycle({
+const { cycle, resetCycle, decide } = createCycle({
   task: async (id) => (await poo.task(id)) as unknown as Snapshot,
   setModel: (id, m) => poo.setModel(id, m),
   send,
@@ -505,10 +534,13 @@ const { cycle, resetCycle } = createCycle({
   publish,
   schedule: planner ? schedule : undefined,
   publishGate: planner ? (issueId) => planner.gate(issueId) : undefined,
+  workStarted: planner ? (issueId) => planner.workStarted(issueId) : undefined,
+  kickoff: planner ? kickoff : undefined,
+  closeTiming: planner ? closeTiming : undefined,
   save,
   log,
   now: Date.now,
-  cfg: { model, reviewModel, maxFixes, maxReviews, reviewTimeoutMs },
+  cfg: { model, analysisModel, reviewModel, maxFixes, maxReviews, reviewTimeoutMs },
 });
 
 /** Atiende una incidencia que ya tiene conversación: comentarios nuevos y avance del ciclo. */
@@ -527,6 +559,20 @@ async function attendLinked(listed: Issue, linked: Linked, full?: Issue) {
     return;
   }
   if (linked.closedNoted) linked.closedNoted = undefined;
+  // Asignada a otra persona: no es nuestro flujo (indicación del propietario, 2026-11-18: «si está
+  // asignado a otra persona, ¿para qué verlo?»). Sus comentarios no se leen ni se proponen
+  // respuestas; si regresa a esta cuenta, los que se hayan acumulado llegan juntos entonces.
+  // Solo se termina lo que ya estaba en marcha (un cierre que el propietario ya decidió).
+  if (listed.assigned_to && state.userId !== undefined && listed.assigned_to.id !== state.userId) {
+    if (!linked.notOursNoted) {
+      linked.notOursNoted = true;
+      save();
+      log(`#${id}: ahora está asignada a ${listed.assigned_to.name}; sus comentarios no se atienden mientras no vuelva a esta cuenta`);
+    }
+    if (linked.hold || linked.pending || linked.review || linked.outbox?.length || linked.decision) await cycle(id, linked).catch((err) => log(`#${id}: ciclo pendiente (${errorText(err)})`));
+    return;
+  }
+  if (linked.notOursNoted) linked.notOursNoted = undefined;
   // El detalle (comentarios) solo se pide si Redmine dice que la incidencia cambió.
   if (linked.seenUpdatedOn !== listed.updated_on) {
     const issue = full ?? (await redmine.detail(listed.id));
@@ -534,9 +580,16 @@ async function attendLinked(listed: Issue, linked: Linked, full?: Issue) {
     if (fresh.length && linked.taskId) {
       const text = clarifyPrompt(issue, fresh);
       const busy = isBusy((await conversations()).get(linked.taskId)?.status ?? "idle");
+      // Una respuesta es análisis; solo si hay un trabajo en marcha (arrancado y sin entregar) se queda con el modelo de trabajo.
+      const working = linked.kickedPlan !== undefined && linked.kickedPlan === linked.scheduled?.planAt && !(linked.published && linked.published.at > (linked.kickedAt ?? 0));
+      if (!working) linked.mode = "analisis";
       // En plena supervisión o con un turno en marcha, espera su turno: no se cruza con el supervisor.
       if (busy || linked.review || linked.pending) linked.outbox = [...(linked.outbox ?? []), text];
-      else await send(linked.taskId, text);
+      else {
+        const wanted = linked.mode === "analisis" ? (analysisModel ?? model) : model;
+        if (wanted) await poo.setModel(linked.taskId, wanted).catch((err) => log(`#${id}: no pude poner el modelo ${wanted} (${errorText(err)})`));
+        await send(linked.taskId, text);
+      }
       resetCycle(linked);
       linked.kind = "respuesta";
       linked.clarify = fresh.map((j) => `- ${j.user.name}: ${j.notes}`).join("\n").slice(0, 6000);
@@ -644,7 +697,7 @@ async function tick() {
       const fresh = await redmine.detail(i.id);
       known.set(String(i.id), fresh);
       const taskId = await openConversation(fresh, pickup);
-      state.issues[i.id] = { taskId, kind: "trabajo", protocol: 2, lastJournalId: lastJournalId(fresh), seenUpdatedOn: fresh.updated_on, linkedAt: new Date().toISOString(), agendaSince: Date.now() };
+      state.issues[i.id] = { taskId, kind: "trabajo", protocol: 3, mode: "analisis", lastJournalId: lastJournalId(fresh), seenUpdatedOn: fresh.updated_on, linkedAt: new Date().toISOString(), agendaSince: Date.now() };
       save();
       log(`#${i.id} asignada → conversación ${taskId}`);
       continue;
@@ -658,19 +711,40 @@ async function tick() {
   await conversations().catch(() => undefined);
 }
 
-/** La agenda manda: refleja lo que se movió allá y pasa a «En curso» lo que ya empezó. */
+/**
+ * Plan aprobado y agendado → «En curso» con su fecha fin y su tiempo estimado, en ese momento
+ * (indicación del propietario, 2026-11-18: «cuando apruebo el plan, la pasas en curso y declaras
+ * los tiempos»). El trabajo en sí empieza cuando llega su bloque (cycle.ts lo arranca).
+ */
+async function startScheduled(only?: string) {
+  if (!planner) return;
+  for (const [id, linked] of Object.entries(state.issues)) {
+    if (only !== undefined && id !== only) continue;
+    if (!linked.taskId || linked.gone || linked.closedNoted || !linked.scheduled) continue;
+    if (linked.startedPlan === linked.scheduled.planAt) continue;
+    // Lo agendado antes de este flujo (sin aprobación registrada) conserva la regla anterior: al empezar su bloque.
+    if (linked.planApproved !== linked.scheduled.planAt && !planner.workStarted(id)) continue;
+    await startIssue(id, linked).then(
+      (what) => what && log(`#${id}: plan aprobado y agendado → ${what}`),
+      (err) => log(`#${id}: plan agendado pero no pude pasarla a «${START_STATUS}» (${errorText(err)}); reintento en el siguiente sondeo`),
+    );
+  }
+}
+
+/** La agenda manda: refleja lo que se movió allá, pasa a «En curso» lo aprobado y arranca lo que ya empezó. */
 async function agendaTick() {
   if (!planner) return;
   await planner.sync();
   if (plannerState.syncError) log(`agenda: no pude leerla (${plannerState.syncError})`);
   planner.tick();
+  await startScheduled();
+  // El arranque del agente cuando empieza su bloque no espera al siguiente sondeo de Redmine.
+  overview = undefined;
   for (const [id, linked] of Object.entries(state.issues)) {
     if (!linked.taskId || linked.gone || linked.closedNoted || !linked.scheduled) continue;
-    if (linked.startedPlan === linked.scheduled.planAt || !planner.workStarted(id)) continue;
-    await startIssue(id, linked).then(
-      (what) => what && log(`#${id}: empezó su bloque de la agenda → ${what}`),
-      (err) => log(`#${id}: empezó su bloque pero no pude pasarla a «${START_STATUS}» (${errorText(err)}); reintento en el siguiente sondeo`),
-    );
+    if (linked.kickedPlan === linked.scheduled.planAt || linked.planApproved !== linked.scheduled.planAt || !planner.workStarted(id)) continue;
+    if (linked.lastMark !== undefined && linked.lastMark !== "APROBADO" && linked.lastMark !== "PLAN") continue;
+    await cycle(id, linked).catch((err) => log(`#${id}: ciclo pendiente (${errorText(err)})`));
   }
 }
 
@@ -700,6 +774,22 @@ function issueCards(): IssueCard[] {
     if (linked?.scheduled) history.push({ at: linked.scheduled.at, text: `Poo apartó el tiempo: ${linked.scheduled.summary}.` });
     if (linked?.ownerSaid) history.push({ at: linked.ownerSaid.at, text: `Le dijiste a Poo: «${linked.ownerSaid.text}»` });
     history.sort((a, b) => a.at - b.at);
+    // ¿Hay un cierre entregado esperando tu decisión? (lo publicado después de pedirlo ya no cuenta)
+    const publishedNow = Boolean(linked?.published && linked.closeAt && linked.published.at >= linked.closeAt);
+    const closing = Boolean(linked?.closeAt && !linked.review && !linked.pending && !linked.hold && !publishedNow && !linked.releasedAt && (stage === "EJECUTADO" || stage === "RESPUESTA" || stage === "CIERRE"));
+    const planPending = Boolean(stage === "PLAN" && linked?.planAt && linked.scheduled?.planAt !== linked.planAt);
+    const pausedClose = Boolean(stage === "EN ESPERA" && linked?.closeAt && !publishedNow && linked.pausedFrom);
+    const early = closing && (linked?.kind ?? "trabajo") === "trabajo" ? planner?.gate(id) : undefined;
+    const decisions: IssueCard["decisions"] = planPending
+      ? ["aprobar", "ajustar"]
+      : closing
+        ? early?.wait
+          ? ["finalizar", "programar", "rechazar", "esperar"]
+          : ["finalizar", "rechazar", "esperar"]
+        : pausedClose
+          ? ["retomar"]
+          : undefined;
+    const doc = linked?.directory ? findReadme(linked.directory) : undefined;
     const turn = classify({
       status: issue.status.name,
       ours,
@@ -707,8 +797,9 @@ function issueCards(): IssueCard[] {
       busy: Boolean(linked?.taskId && isBusy(lastOverview?.get(linked.taskId)?.status ?? "idle")),
       stage,
       reviewing: Boolean(linked?.review),
-      awaitingClose: Boolean(linked?.closeAt && !linked.review && !linked.pending && (stage === "EJECUTADO" || stage === "RESPUESTA")),
+      awaitingClose: closing,
       hold: Boolean(linked?.hold),
+      releasing: Boolean(linked?.releasedAt && linked.closeAt && linked.releasedAt >= linked.closeAt && !publishedNow),
       work,
       asked: Boolean(story.asked),
       now,
@@ -758,9 +849,57 @@ function issueCards(): IssueCard[] {
       ownerSaid: linked?.ownerSaid,
       asked: story.asked,
       history,
+      decisions,
+      closing:
+        linked?.approved && linked.closeAt && !publishedNow
+          ? { notes: linked.approved.notes, at: linked.approved.at, edited: linked.approved.edited, attachments: linked.approved.attachments.map((a) => a.split("/").pop() ?? a) }
+          : undefined,
+      plannedEnd: early?.wait ? early.until : undefined,
+      readme: doc ? { name: doc.name, at: doc.at, bytes: doc.bytes } : undefined,
+      kickedAt: linked?.kickedPlan !== undefined && linked.kickedPlan === linked.scheduled?.planAt ? linked.kickedAt : undefined,
+      mode: linked?.mode,
+      published: linked?.published ? { at: linked.published.at, result: linked.published.result } : undefined,
     });
   }
   return cards.sort(byTurn);
+}
+
+/** El README para el frontal más reciente de una carpeta de conversación (`README-front-*.md`). */
+function findReadme(directory: string): { path: string; name: string; at: number; bytes: number } | undefined {
+  try {
+    let best: { path: string; name: string; at: number; bytes: number } | undefined;
+    for (const name of readdirSync(directory)) {
+      if (!/^readme[-_.]?front.*\.md$/i.test(name)) continue;
+      const path = join(directory, name);
+      const stat = statSync(path);
+      if (!stat.isFile() || stat.size > 512 * 1024) continue;
+      if (!best || stat.mtimeMs > best.at) best = { path, name, at: Math.round(stat.mtimeMs), bytes: stat.size };
+    }
+    return best;
+  } catch {
+    return undefined;
+  }
+}
+
+/** El propietario edita el comentario de cierre: su texto es el que se publica. */
+function setComment(issueId: number, notes: string) {
+  const linked = state.issues[String(issueId)];
+  if (!linked?.taskId) throw new PlanError("no_encontrada", "Esa petición no tiene conversación.");
+  if (!linked.closeAt || (linked.published && linked.published.at >= linked.closeAt)) throw new PlanError("no_aplica", "Esa petición no tiene un cierre pendiente de publicar.");
+  const text = normalizeNotes(notes);
+  const at = Date.now();
+  linked.approved = { hash: hashOf(text), notes: text, attachments: linked.approved?.attachments ?? [], at, edited: true };
+  // La vista previa queda igual que lo aprobado: el agente y el supervisor leen tu texto.
+  const file = resolve(previewDir, `${issueId}.json`);
+  try {
+    const previous = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>) : {};
+    mkdirSync(previewDir, { recursive: true, mode: 0o700 });
+    writeJson(file, { ...previous, at, notes: text, capture: null, editedByOwner: true });
+  } catch (err) {
+    log(`#${issueId}: no pude actualizar la vista previa con tu edición (${errorText(err)})`);
+  }
+  save();
+  log(`#${issueId}: el propietario editó el comentario de cierre en la Agenda (${text.length} caracteres)`);
 }
 
 function httpToken() {
@@ -792,6 +931,26 @@ function serveAgenda() {
       planner.release(issueId);
       log(`#${issueId}: «Publicar ya» del propietario; el cierre no espera al final del bloque`);
       await cycle(String(issueId), linked).catch((err) => log(`#${issueId}: ciclo pendiente (${errorText(err)})`));
+    },
+    decide: async (issueId, decision: AgendaDecision, note) => {
+      const linked = state.issues[String(issueId)];
+      if (!linked?.taskId) throw new PlanError("no_encontrada", "Esa petición no tiene conversación.");
+      overview = undefined;
+      try {
+        const done = await decide(String(issueId), linked, { decision, note });
+        // Plan aprobado: «En curso» con fecha fin y tiempo estimado, sin esperar al siguiente sondeo.
+        if (decision === "aprobar") await startScheduled(String(issueId)).catch((err) => log(`#${issueId}: ${errorText(err)}`));
+        return done;
+      } catch (err) {
+        if (err instanceof DecisionError) throw new PlanError("no_aplica", err.message);
+        throw err;
+      }
+    },
+    setComment: async (issueId, notes) => setComment(issueId, notes),
+    readme: async (issueId) => {
+      const directory = state.issues[String(issueId)]?.directory;
+      const doc = directory ? findReadme(directory) : undefined;
+      return doc ? { name: doc.name, text: readFileSync(doc.path, "utf8") } : undefined;
     },
     /** Agendar a mano una petición que no tiene bloque (p. ej. las que ya estaban abiertas). */
     plan: async (issueId, minutes) => {

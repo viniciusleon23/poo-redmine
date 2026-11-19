@@ -11,8 +11,8 @@ const answered = (option: string): Part => ({ kind: "tool", tool: "question", st
 /** Una conversación simulada y el vigilante sobre ella. */
 function scene(
   extra: Partial<Linked> = {},
-  cfg: Partial<{ model: string; reviewModel: string | undefined; maxFixes: number; maxReviews: number; reviewTimeoutMs: number }> = {},
-  agenda?: { fails?: () => boolean; gate?: () => { wait: boolean; until?: number } },
+  cfg: Partial<{ model: string; analysisModel: string | undefined; reviewModel: string | undefined; maxFixes: number; maxReviews: number; reviewTimeoutMs: number }> = {},
+  agenda?: { fails?: () => boolean; gate?: () => { wait: boolean; until?: number }; started?: () => boolean; timing?: () => { until: string; now: string } | undefined },
 ) {
   let clock = 1_000_000;
   const tick = () => (clock += 1000);
@@ -28,7 +28,7 @@ function scene(
   let publishFails = false;
   const scheduled: string[] = [];
   const kinds: string[] = [];
-  const { cycle } = createCycle({
+  const { cycle, decide } = createCycle({
     task: async () => {
       fetches++;
       return { task: { ...conv }, messages: messages.map((m) => ({ ...m })) };
@@ -58,6 +58,9 @@ function scene(
         }
       : undefined,
     publishGate: agenda?.gate ? () => agenda.gate!() : undefined,
+    workStarted: agenda?.started ? () => agenda.started!() : undefined,
+    kickoff: agenda?.started ? async (_issue, l) => `Aviso del vigilante: empezó el bloque de #39015 en la agenda.\n${l.plan ?? ""}` : undefined,
+    closeTiming: agenda?.timing ? () => agenda.timing!() : undefined,
     save: () => {},
     log: (line) => logs.push(line),
     now: () => tick(),
@@ -68,6 +71,7 @@ function scene(
     fetches: () => fetches,
     clock: () => clock,
     run: () => cycle("39015", linked),
+    decide: (decision: Parameters<typeof decide>[2]["decision"], note?: string) => decide("39015", linked, { decision, note }),
     agent: (text: string, ...parts: Part[]) => messages.push({ role: "assistant", createdAt: tick(), completedAt: tick(), parts: [...parts, { kind: "text", text }] }),
     owner: (text: string) => messages.push({ role: "user", createdAt: tick(), parts: [{ kind: "text", text }] }),
     setPreview: (notes: string | undefined) => {
@@ -150,7 +154,7 @@ test("observaciones: una ronda de corrección, segunda pasada y, si sigue, se le
   await s.run();
   assert.match(s.sent[3]!, /^El supervisor sigue con observaciones/);
   assert.ok(s.linked.closeAt, "el propietario decide con los mismos botones");
-  assert.equal(s.linked.approved, undefined, "no hay comentario aprobado");
+  assert.equal(s.linked.approved?.notes, "Hola Hugo, quedó. 🐼", "el comentario que hay es el que el propietario decide entregar así o editar");
 
   // El propietario rechaza; no se publica nada aunque el agente marque un cierre por error.
   s.agent("Entendido, ¿qué corrijo?\n\nEtapa: RECHAZADO", answered("Rechazar"));
@@ -375,35 +379,59 @@ test("si el agente ejecutó sin que se viera el botón, el plan se da por aproba
   assert.equal(s.logs.filter((l) => /no pude agendarlo/.test(l)).length, 1);
 });
 
-test("el cierre de un trabajo espera al final del bloque agendado; el de una respuesta no", async () => {
+test("«Finalizar» publica en cuanto el agente sube; «A su hora» espera al final del bloque y entonces se pide publicar todo", async () => {
+  // Finalizar: aunque le quede bloque, se publica ya (lo decidió el propietario con el recordatorio delante).
+  const now = scene({ agendaSince: 0, kind: "trabajo" }, {}, { gate: () => ({ wait: true, until: 2_000_000 }), timing: () => ({ until: "15:00", now: "11:05" }) });
+  now.setPreview("Hola Hugo, ya quedó. 🐼");
+  now.agent("Hecho.\n\nEtapa: EJECUTADO");
+  await now.run();
+  now.agent("Veredicto: CUMPLE");
+  await now.run();
+  assert.match(now.sent.at(-1)!, /estaba planificada para terminar a las 15:00 y son las 11:05/);
+  assert.match(now.sent.at(-1)!, /«A su hora» \(publicar a las 15:00\)/);
+  now.agent("Cierre entregado. ¿Finalizo #39015?\n\nEtapa: CIERRE");
+  await now.run();
+  assert.equal(now.linked.lastMark, "CIERRE");
+  now.owner("finaliza");
+  now.agent("Dev abc1234, producción def5678, verificado.\n\nEtapa: DESPLEGADO");
+  await now.run();
+  assert.equal(now.published.length, 1, "el propietario eligió publicar ya");
+  assert.equal(now.linked.hold, undefined);
+
+  // A su hora: nada sube hasta que termina el bloque.
   let wait = true;
-  const s = scene({ agendaSince: 0, kind: "trabajo" }, {}, { gate: () => ({ wait, until: 2_000_000 }) });
-  s.agent(`${PLAN_WITH_TIME}\n\nEtapa: PLAN`);
-  await s.run();
+  const s = scene({ agendaSince: 0, kind: "trabajo" }, {}, { gate: () => ({ wait, until: 2_000_000 }), timing: () => ({ until: "15:00", now: "11:05" }) });
   s.setPreview("Hola Hugo, ya quedó. 🐼");
-  s.agent("Hecho.\n\nEtapa: EJECUTADO", answered("Aprobar"));
+  s.agent("Hecho.\n\nEtapa: EJECUTADO");
   await s.run();
   s.agent("Veredicto: CUMPLE");
   await s.run();
-  s.agent("Subí a main (SHA abc1234).\n\nEtapa: DESPLEGADO", answered("Finalizar"));
+  s.agent("Cierre entregado.\n\nEtapa: CIERRE");
   await s.run();
-  assert.equal(s.published.length, 0, "el trabajo está listo, pero Redmine lo ve a la hora planificada");
-  assert.equal(s.linked.hold?.mark, "DESPLEGADO");
+  s.owner("a su hora");
+  s.agent("Queda programado para las 15:00.\n\nEtapa: PROGRAMADO");
+  await s.run();
+  assert.equal(s.linked.hold?.mark, "PROGRAMADO");
   assert.equal(s.linked.hold?.until, 2_000_000);
+  assert.equal(s.published.length, 0);
   assert.equal(s.sent.filter((t) => /Aviso del vigilante/.test(t)).length, 0, "esperar no es un problema: no se avisa en el hilo");
   await s.run();
   const fetched = s.fetches();
   await s.run();
   await s.run();
   assert.equal(s.fetches(), fetched, "mientras espera no se vuelve a pedir el historial");
-  assert.equal(s.published.length, 0);
 
-  // Termina el bloque (o el propietario pulsa «Publicar ya»): se publica una vez.
+  // Termina el bloque (o «Publicar ya» en la Agenda): se le pide al agente publicar todo, y al cerrar se publica el comentario.
   wait = false;
+  await s.run();
+  assert.match(s.sent.at(-1)!, /^Aviso del vigilante: llegó la hora de publicar #39015/);
+  assert.match(s.sent.at(-1)!, /Producción/);
+  assert.equal(s.linked.hold, undefined);
+  assert.equal(s.published.length, 0, "el comentario sale cuando ya subió a los dos ambientes");
+  s.agent("Dev abc1234, producción def5678, verificado.\n\nEtapa: DESPLEGADO");
   await s.run();
   assert.equal(s.published.length, 1);
   assert.deepEqual(s.kinds, ["trabajo"]);
-  assert.equal(s.linked.hold, undefined);
   await s.run();
   assert.match(s.sent.at(-1)!, /^Aviso del vigilante: el comentario de #39015 ya quedó publicado/);
   await s.run();
@@ -422,14 +450,14 @@ test("el cierre de un trabajo espera al final del bloque agendado; el de una res
   assert.deepEqual(r.kinds, ["respuesta"]);
 });
 
-test("un cierre en espera se descarta si el propietario lo rechaza después", async () => {
+test("un cierre programado se descarta si el propietario lo rechaza después", async () => {
   const s = scene({ agendaSince: 0, kind: "trabajo" }, {}, { gate: () => ({ wait: true, until: 5 }) });
   s.setPreview("Hola Hugo, ya quedó. 🐼");
   s.agent("Hecho.\n\nEtapa: EJECUTADO");
   await s.run();
   s.agent("Veredicto: CUMPLE");
   await s.run();
-  s.agent("Subí a main.\n\nEtapa: DESPLEGADO", answered("Finalizar"));
+  s.agent("Queda para su hora.\n\nEtapa: PROGRAMADO", answered("A su hora"));
   await s.run();
   assert.ok(s.linked.hold);
   s.owner("rechaza, falta el caso de las citas canceladas");
@@ -437,4 +465,159 @@ test("un cierre en espera se descarta si el propietario lo rechaza después", as
   await s.run();
   assert.equal(s.linked.hold, undefined);
   assert.equal(s.published.length, 0);
+});
+
+test("aprobar no ejecuta: el arranque llega cuando empieza el bloque, con el modelo de trabajo", async () => {
+  const ANALYSIS = "claude/claude-opus-5-5@medium";
+  let started = false;
+  const s = scene({ agendaSince: 0, kind: "trabajo", mode: "analisis", protocol: 3 }, { analysisModel: ANALYSIS }, { started: () => started });
+  s.conv.model = ANALYSIS;
+  s.agent(`${PLAN_WITH_TIME}\n\n¿Apruebo el plan?\n\nEtapa: PLAN`);
+  await s.run();
+  assert.equal(s.scheduled.length, 0);
+  s.owner("sí, dale");
+  s.agent("Aprobado; espero el aviso de mi bloque.\n\nEtapa: APROBADO");
+  await s.run();
+  assert.equal(s.scheduled.length, 1, "al aprobar se aparta el tiempo");
+  assert.equal(s.linked.lastMark, "APROBADO");
+  assert.equal(s.sent.length, 0, "todavía no es su hora: no se le manda nada");
+  await s.run();
+  assert.equal(s.sent.length, 0);
+
+  started = true;
+  await s.run();
+  assert.equal(s.sent.length, 1);
+  assert.match(s.sent[0]!, /^Aviso del vigilante: empezó el bloque de #39015/);
+  assert.deepEqual(s.models, [WORK], "el trabajo lo toma el modelo de trabajo");
+  assert.equal(s.linked.mode, "trabajo");
+  await s.run();
+  await s.run();
+  assert.equal(s.sent.length, 1, "el arranque se manda una sola vez");
+
+  // El supervisor entra y la conversación vuelve al modelo de trabajo, no al de análisis.
+  s.setPreview("Hola Hugo, ya quedó. 🐼");
+  s.agent("Hecho.\n\nEtapa: EJECUTADO");
+  await s.run();
+  s.agent("Veredicto: CUMPLE");
+  await s.run();
+  assert.deepEqual(s.models, [WORK, REVIEW, WORK]);
+});
+
+test("desde la Agenda: aprobar agenda sin pasar por el chat, y el arranque sale si el bloque ya empezó", async () => {
+  const s = scene({ agendaSince: 0, kind: "trabajo", protocol: 3 }, {}, { started: () => true });
+  await assert.rejects(() => s.decide("aprobar"), /No hay un plan pendiente/);
+  s.agent(`${PLAN_WITH_TIME}\n\n¿Apruebo el plan?\n\nEtapa: PLAN`);
+  await s.run();
+  const done = await s.decide("aprobar");
+  assert.match(done, /^Plan aprobado: 3 h de trabajo/);
+  assert.equal(s.scheduled.length, 1);
+  assert.equal(s.linked.planApproved, s.linked.planAt);
+  assert.match(s.sent.at(-1)!, /^Aviso del vigilante: empezó el bloque/);
+  await assert.rejects(() => s.decide("aprobar"), /No hay un plan pendiente/, "no se aprueba dos veces");
+
+  // Ajustar: se le dice al agente lo que pidió el propietario.
+  const a = scene({ agendaSince: 0, kind: "trabajo", protocol: 3 }, {}, { started: () => false });
+  a.agent(`${PLAN_WITH_TIME}\n\nEtapa: PLAN`);
+  await a.run();
+  await a.decide("ajustar", "que no toque el reporte");
+  assert.match(a.sent.at(-1)!, /pidió ajustar el plan de #39015 desde la Agenda/);
+  assert.match(a.sent.at(-1)!, /que no toque el reporte/);
+  assert.equal(a.scheduled.length, 0);
+});
+
+test("desde la Agenda: finalizar pide publicar todo, programar espera a su hora, esperar y retomar no gastan turnos", async () => {
+  let wait = true;
+  const s = scene({ agendaSince: 0, kind: "trabajo" }, {}, { gate: () => ({ wait, until: 2_000_000 }), timing: () => ({ until: "15:00", now: "11:05" }) });
+  await assert.rejects(() => s.decide("finalizar"), /no tiene un cierre esperando/);
+  s.setPreview("Hola Hugo, ya quedó. 🐼");
+  s.agent("Hecho.\n\nEtapa: EJECUTADO");
+  await s.run();
+  s.agent("Veredicto: CUMPLE");
+  await s.run();
+  s.agent("Cierre entregado.\n\nEtapa: CIERRE");
+  await s.run();
+  const before = s.sent.length;
+
+  // Esperar y retomar: solo cambia la etapa.
+  await s.decide("esperar");
+  assert.equal(s.linked.lastMark, "EN ESPERA");
+  await s.decide("retomar");
+  assert.equal(s.linked.lastMark, "CIERRE");
+  assert.equal(s.sent.length, before);
+
+  // Programar: queda en espera de su hora, sin turno del agente.
+  await s.decide("programar");
+  assert.equal(s.linked.hold?.mark, "PROGRAMADO");
+  assert.equal(s.sent.length, before);
+  wait = false;
+  await s.run();
+  assert.match(s.sent.at(-1)!, /llegó la hora de publicar #39015/);
+  s.agent("Dev abc, producción def.\n\nEtapa: DESPLEGADO");
+  await s.run();
+  assert.equal(s.published.length, 1);
+
+  // Finalizar: se le pide al agente publicar ahora; el comentario sale con su DESPLEGADO.
+  const f = scene({ agendaSince: 0, kind: "trabajo" }, {}, { gate: () => ({ wait: true, until: 2_000_000 }) });
+  f.setPreview("Hola Hugo, ya quedó. 🐼");
+  f.agent("Hecho.\n\nEtapa: EJECUTADO");
+  await f.run();
+  f.agent("Veredicto: CUMPLE");
+  await f.run();
+  f.agent("Cierre entregado.\n\nEtapa: CIERRE");
+  await f.run();
+  await f.decide("finalizar");
+  assert.match(f.sent.at(-1)!, /el propietario eligió «Finalizar» para #39015 desde la Agenda/);
+  assert.match(f.sent.at(-1)!, /PR `main`→`production`/);
+  assert.equal(f.published.length, 0);
+  f.agent("Dev abc, producción def.\n\nEtapa: DESPLEGADO");
+  await f.run();
+  assert.equal(f.published.length, 1, "aunque le quede bloque: el propietario eligió publicar ya");
+
+  // Rechazar: nada se publica y se abre un ciclo nuevo.
+  const r = scene({ agendaSince: 0, kind: "trabajo" });
+  r.setPreview("Hola Hugo, ya quedó. 🐼");
+  r.agent("Hecho.\n\nEtapa: EJECUTADO");
+  await r.run();
+  r.agent("Veredicto: CUMPLE");
+  await r.run();
+  r.agent("Cierre entregado.\n\nEtapa: CIERRE");
+  await r.run();
+  await r.decide("rechazar", "falta el caso de la 134");
+  assert.match(r.sent.at(-1)!, /rechazó el cierre de #39015 desde la Agenda/);
+  assert.match(r.sent.at(-1)!, /falta el caso de la 134/);
+  assert.equal(r.linked.reviews, 0);
+
+  // Respuesta a un comentario: finalizar la publica sin otro turno del agente.
+  const c = scene({ agendaSince: 0, kind: "respuesta" });
+  c.setPreview("Hola Hugo, sí aplica. 🐼");
+  c.agent("Respondo.\n\nEtapa: RESPUESTA");
+  await c.run();
+  c.agent("Veredicto: CUMPLE");
+  await c.run();
+  c.agent("Cierre entregado.\n\nEtapa: CIERRE");
+  await c.run();
+  const sentBefore = c.sent.length;
+  assert.match(await c.decide("finalizar"), /Respuesta publicada/);
+  assert.equal(c.published.length, 1);
+  assert.deepEqual(c.kinds, ["respuesta"]);
+  assert.match(c.sent[sentBefore]!, /ya quedó publicado/);
+});
+
+test("el comentario que edita el propietario es el que se publica, aunque la vista previa del agente diga otra cosa", async () => {
+  const s = scene({ agendaSince: 0, kind: "trabajo" });
+  s.setPreview("Hola Hugo, ya quedó. 🐼");
+  s.agent("Hecho.\n\nEtapa: EJECUTADO");
+  await s.run();
+  s.agent("Veredicto: CUMPLE");
+  await s.run();
+  s.agent("Cierre entregado.\n\nEtapa: CIERRE");
+  await s.run();
+  // Lo que hace main.ts al guardar la edición del propietario.
+  const mine = "Hola Hugo, ya está listo; avísame si ves algo raro. 🐼";
+  s.linked.approved = { hash: hashOf(mine), notes: mine, attachments: [], at: s.clock(), edited: true };
+  await s.decide("finalizar");
+  s.agent("Dev abc, producción def.\n\nEtapa: DESPLEGADO");
+  await s.run();
+  assert.equal(s.published.length, 1);
+  assert.equal(s.published[0]!.notes, mine);
 });

@@ -25,6 +25,7 @@ export type CardState =
   | "en_bloque"
   | "supervision"
   | "lista" // cierre listo, espera su hora para publicarse
+  | "publicando" // ya lo autorizaste: Poo sube a dev y a producción y después publica el comentario
   // Espera a otra persona
   | "respuesta" // preguntaste algo en Redmine y nadie ha contestado
   | "entregada";
@@ -45,6 +46,8 @@ export interface CardInput {
   awaitingClose: boolean;
   /** Cierre listo que espera al final de su bloque. */
   hold: boolean;
+  /** El propietario ya autorizó el cierre y Poo está publicando (dev, producción, comentario). */
+  releasing?: boolean;
   work?: { start: number; end: number };
   /** El último comentario de Redmine es una pregunta o petición tuya sin respuesta. */
   asked?: boolean;
@@ -79,6 +82,7 @@ export function waitingOn(status: string): string {
 export function classify(input: CardInput): { turn: Turn; state: CardState; waitingOn?: string } {
   const { stage } = input;
   if (input.hold) return { turn: "poo", state: "lista" };
+  if (input.releasing && stage !== "BLOQUEADO") return { turn: "poo", state: "publicando" };
   if (input.reviewing) return { turn: "poo", state: "supervision" };
   if (input.awaitingClose) return { turn: "tu", state: "cierre" };
   if (stage === "PLAN") return { turn: "tu", state: "plan" };

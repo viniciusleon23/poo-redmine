@@ -8,6 +8,9 @@
  *   POST /agenda/activities/:id/cancel          la quita de aquí y de la agenda
  *   POST /agenda/issues/:id/plan  {hours}       aparta tiempo a mano para una petición
  *   POST /agenda/issues/:id/publish             «Publicar ya»: el cierre no espera al final del bloque
+ *   POST /agenda/issues/:id/decision {decision, note?}   lo que decides sin ir al chat: aprobar/ajustar el plan; finalizar, programar, rechazar, esperar o retomar el cierre
+ *   POST /agenda/issues/:id/comment  {notes}    tu versión del comentario de cierre: es la que se publica
+ *   GET  /agenda/issues/:id/readme              el README para el frontal que dejó Poo, para compartirlo
  *   POST /agenda/sync                           vuelve a leer la agenda ahora
  *   POST /agenda/avisos                         avisos (webhooks) de la agenda, verificados por firma
  */
@@ -18,6 +21,8 @@ import type { CardState, Turn } from "./cards.ts";
 import { PlanError } from "./planner.ts";
 import type { AgendaItem, Planner } from "./planner.ts";
 import { dateKey, dayStart } from "./slots.ts";
+import { buildTimeline } from "./timeline.ts";
+import type { DayTimeline } from "./timeline.ts";
 import type { HistoryEvent, PlanBrief } from "./story.ts";
 import type { WorkWeek } from "./slots.ts";
 
@@ -72,7 +77,24 @@ export interface IssueCard {
   asked?: { at: number; to: string[]; text: string };
   /** Recorrido con fecha y hora. */
   history: HistoryEvent[];
+  /** Lo que puedes decidir ahora mismo desde la Agenda, sin ir al chat. */
+  decisions?: IssueDecision[];
+  /** El comentario de cierre que se publicará: el que aprobó el supervisor o tu edición. */
+  closing?: { notes: string; at: number; edited?: boolean; attachments?: string[] };
+  /** Si el trabajo quedó listo antes de tiempo: cuándo termina su bloque. */
+  plannedEnd?: number;
+  /** README para el frontal que dejó Poo en la conversación. */
+  readme?: { name: string; at: number; bytes: number };
+  /** Cuándo se le mandó a Poo el arranque del trabajo (empezó su bloque). */
+  kickedAt?: number;
+  /** Modelo que atiende ahora la conversación fuera de la supervisión: análisis o trabajo. */
+  mode?: "analisis" | "trabajo";
+  /** Qué quedó publicado en Redmine, en una línea. */
+  published?: { at: number; result: string };
 }
+
+export type IssueDecision = "aprobar" | "ajustar" | "finalizar" | "programar" | "rechazar" | "esperar" | "retomar";
+const DECISIONS: readonly IssueDecision[] = ["aprobar", "ajustar", "finalizar", "programar", "rechazar", "esperar", "retomar"];
 
 export interface AgendaView {
   zone: string;
@@ -86,6 +108,8 @@ export interface AgendaView {
   /** El vigilante de Redmine: cuándo leyó Redmine por última vez y cada cuánto lo hace. */
   watch?: WatchBeat;
   items: AgendaItem[];
+  /** La jornada completa de cada día, con sus tiempos libres (agenda/timeline.ts). */
+  timeline: DayTimeline[];
   issues: IssueCard[];
 }
 
@@ -110,6 +134,12 @@ export interface AgendaHttpOptions {
   watch?(): WatchBeat;
   publishNow(issueId: number): Promise<void>;
   plan(issueId: number, minutes: number): Promise<void>;
+  /** Decisión del propietario desde la Agenda; devuelve qué pasó, en una línea. */
+  decide?(issueId: number, decision: IssueDecision, note?: string): Promise<string>;
+  /** El propietario edita el comentario de cierre. */
+  setComment?(issueId: number, notes: string): Promise<void>;
+  /** README para el frontal de esa petición. */
+  readme?(issueId: number): Promise<{ name: string; text: string } | undefined>;
 }
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -140,7 +170,7 @@ async function readBody(req: IncomingMessage, limit = 256 * 1024) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-const STATUS: Record<PlanError["code"], number> = { sin_hueco: 409, ocupado: 409, no_movible: 409, no_encontrada: 404, datos: 400, agenda: 502 };
+const STATUS: Record<PlanError["code"], number> = { sin_hueco: 409, ocupado: 409, no_movible: 409, no_encontrada: 404, datos: 400, agenda: 502, no_aplica: 409 };
 
 /** Construye la vista de `days` días a partir de `from` (YYYY-MM-DD local). */
 export function buildView(options: Pick<AgendaHttpOptions, "planner" | "week" | "now" | "issues" | "watch">, from: string | undefined, days: number): AgendaView {
@@ -150,6 +180,8 @@ export function buildView(options: Pick<AgendaHttpOptions, "planner" | "week" | 
   const first = from && DATE.test(from) ? from : today;
   const span = Math.min(31, Math.max(1, Math.floor(days) || 7));
   const start = dayStart(first, week.timeZone);
+  const items = planner.view(start, start + span * 86_400_000);
+  const issues = options.issues();
   return {
     zone: week.timeZone,
     now,
@@ -160,8 +192,17 @@ export function buildView(options: Pick<AgendaHttpOptions, "planner" | "week" | 
     syncedAt: planner.state.syncedAt,
     syncError: planner.state.syncError,
     watch: options.watch?.(),
-    items: planner.view(start, start + span * 86_400_000),
-    issues: options.issues(),
+    items,
+    timeline: buildTimeline({
+      items,
+      busy: planner.state.busy ?? [],
+      week,
+      from: start,
+      days: span,
+      now,
+      issues: new Map(issues.map((c) => [c.issueId, { turn: c.turn, state: c.state }])),
+    }),
+    issues,
   };
 }
 
@@ -215,9 +256,30 @@ export function startAgendaHttp(options: AgendaHttpOptions) {
       if (req.method === "POST" && action === "cancel") return send(200, { data: await planner.cancel(id) });
     }
 
-    const issue = /^\/agenda\/issues\/(\d{1,9})\/(plan|publish)$/.exec(path);
+    const readme = /^\/agenda\/issues\/(\d{1,9})\/readme$/.exec(path);
+    if (readme && req.method === "GET") {
+      const found = await options.readme?.(Number(readme[1]));
+      if (!found) throw new PlanError("no_encontrada", "Esa petición no tiene README para el frontal.");
+      return send(200, { data: found });
+    }
+
+    const issue = /^\/agenda\/issues\/(\d{1,9})\/(plan|publish|decision|comment)$/.exec(path);
     if (issue && req.method === "POST") {
       const id = Number(issue[1]);
+      if (issue[2] === "decision") {
+        const body = JSON.parse((await readBody(req)) || "{}") as { decision?: unknown; note?: unknown };
+        const decision = DECISIONS.find((d) => d === body.decision);
+        if (!decision || !options.decide) throw new PlanError("datos", "Falta la decisión.");
+        const done = await options.decide(id, decision, typeof body.note === "string" ? body.note : undefined);
+        return send(200, { data: { ok: true, done } });
+      }
+      if (issue[2] === "comment") {
+        const body = JSON.parse((await readBody(req)) || "{}") as { notes?: unknown };
+        const notes = typeof body.notes === "string" ? body.notes.trim() : "";
+        if (!notes || notes.length > 8000 || !options.setComment) throw new PlanError("datos", "El comentario va de 1 a 8000 caracteres.");
+        await options.setComment(id, notes);
+        return send(200, { data: { ok: true } });
+      }
       if (issue[2] === "publish") {
         await options.publishNow(id);
         return send(200, { data: { ok: true } });

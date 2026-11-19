@@ -47,6 +47,8 @@ export interface PlannerState {
   released: Record<string, number>;
   /** Última foto de la agenda del propietario (lo que no es de Poo también se muestra). */
   remote?: { sesiones: Sesion[]; bloques: Bloque[] };
+  /** Lo que la agenda da por ocupado en los próximos días (comida, ausencias, festivos…): con ello se pintan los tiempos libres. */
+  busy?: Ocupado[];
   syncedAt?: number;
   syncError?: string;
 }
@@ -55,7 +57,7 @@ export const emptyState = (): PlannerState => ({ activities: [], released: {} })
 
 export class PlanError extends Error {
   constructor(
-    public code: "sin_hueco" | "no_encontrada" | "no_movible" | "ocupado" | "agenda" | "datos",
+    public code: "sin_hueco" | "no_encontrada" | "no_movible" | "ocupado" | "agenda" | "datos" | "no_aplica",
     message: string,
     public conflicts?: unknown[],
   ) {
@@ -452,6 +454,12 @@ export function createPlanner(deps: PlannerDeps) {
               log(`#${a.issueId}: ${a.kind} movido desde la agenda a ${iso(a.start)}`);
             }
           }
+          // Lo ocupado de la semana (la agenda da hasta 14 días por consulta): si falla, se conserva la foto anterior.
+          const dayFrom = dayStart(dateKey(now, week.timeZone), week.timeZone);
+          await agenda
+            .disponibilidad([agenda.user], iso(dayFrom - 86_400_000), iso(dayFrom + 13 * 86_400_000))
+            .then((people) => (state.busy = people.flatMap((p) => p.ocupado)))
+            .catch(() => undefined);
           state.syncedAt = now;
           state.syncError = undefined;
         } catch (err) {

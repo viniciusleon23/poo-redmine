@@ -8,20 +8,38 @@ mismo que de verdad está pasando.
 
 | Paso | Qué pasa | Estado en Redmine |
 |---|---|---|
-| 1. Llega la asignación | Acuse con una frase de catálogo («Hola Catalina, trabajaré en ello 🐼») y se abre la conversación de Poo IA | **En análisis o en revisión** |
-| 2. Análisis y plan | El agente decide el alcance y presenta el plan con su **tiempo estimado** y su **dependencia frontal**. Lo aprueba el propietario | En análisis o en revisión |
-| 3. Plan aprobado | Se aparta el tiempo en la agenda del propietario: primer hueco libre de su jornada, nunca encimado con otra petición; si hoy no cabe, se parte. Con dependencia frontal: subtarea en Redmine y sesión con esa persona | En análisis o en revisión |
-| 4. Empieza el bloque | Aviso de catálogo («ya estoy trabajando en ello 🐼»), con **fecha fin** y **tiempo estimado** | **En curso** |
-| 5. Supervisor y cierre | Un modelo más fuerte revisa; el propietario decide Finalizar, Rechazar o Esperar | En curso |
-| 6. Termina el bloque | Con «Finalizar», se publica el comentario aprobado (una sola vez) | **Terminado por Desarrollo** |
+| 1. Llega la asignación | Acuse con una frase de catálogo («Hola Catalina, trabajaré en ello 🐼») y se abre la conversación de Poo IA con el **modelo de análisis** | **En análisis o en revisión** |
+| 2. Análisis y plan | El agente decide el alcance y presenta el plan con su **tiempo estimado** y su **dependencia frontal**. Lo aprueba el propietario (botón en la Agenda o escribiéndolo) | En análisis o en revisión |
+| 3. Plan aprobado | Se aparta el tiempo en la agenda del propietario (primer hueco libre, nunca encimado; si hoy no cabe, se parte) y **en ese momento** pasa a «En curso» con **fecha fin** y **tiempo estimado**. Con dependencia frontal: subtarea en Redmine y sesión con esa persona | **En curso** |
+| 4. Empieza el bloque | El vigilante le manda el arranque al agente, ya con el **modelo de trabajo**: implementa, prueba, deja el README para el frontal y la vista previa del comentario | En curso |
+| 5. Supervisor y cierre | Un modelo más fuerte revisa. El propietario ve el comentario (y puede editarlo) y decide: **Finalizar**, **A su hora**, **Rechazar** o **Esperar** | En curso |
+| 6. Publicar | El agente sube a `main` (dev) **y** promueve a `production`, verifica los dos despliegues, y entonces el vigilante publica el comentario (una sola vez) | **Terminado por Desarrollo** |
 
-El agente puede dejar el trabajo listo antes de la hora agendada: no se publica hasta que
-termina el bloque, salvo que el propietario pulse «Publicar ya» en la Agenda de la app.
+**Listo antes de tiempo.** Si el trabajo queda listo antes del final de su bloque, el cierre lo dice
+(«estaba planificada para terminar a las 15:00 y son las 11:05») y el propietario elige:
+«Finalizar» publica todo ya; «A su hora» no sube nada hasta que termina el bloque, y entonces el
+vigilante lo dispara solo (merge, producción y comentario). «Publicar ya» en la Agenda adelanta
+un cierre programado.
+
+**Publicar es todo.** Una petición no se entrega con el cambio solo en dev: el cierre lista qué
+entra a `main`, su promoción a `production` y lo que falte en producción además del código
+(datos, variables, alias).
+
+**Sin preguntas colgadas.** El agente no usa la herramienta `question` (dejaba el turno «en
+marcha» esperando sin que el propietario lo viera): termina el turno con la pregunta y su marca
+(`Etapa: PLAN`, `Etapa: CIERRE`) y el propietario responde desde la Agenda o en el chat.
+
 Después siguen Calidad, Consultoría y el cliente; si regresa como «Comentarios o no aprobado»,
 el comentario nuevo llega a la misma conversación.
 
-El vigilante solo mueve el estado de lo que está asignado a su cuenta («cada quien mueve lo
-que tiene asignado»): si la petición ya es de otra persona, publica el comentario y nada más.
+**Solo lo asignado a la cuenta del vigilante.** «Cada quien mueve lo que tiene asignado»: si la
+petición ya es de otra persona, sus comentarios **no se leen ni se proponen respuestas**; si
+vuelve a esta cuenta, los comentarios acumulados llegan juntos entonces.
+
+**README para el frontal.** Toda implementación que toque algo que el frontal consume deja
+`README-front-<tema>.md` en la carpeta de la conversación; el agente lo entrega en el cierre y la
+Agenda lo ofrece para compartir. En Redmine nunca se menciona el README: a lo sumo «se compartirá
+la documentación».
 
 ### Dependencia con el frontal
 
@@ -44,12 +62,13 @@ después del bloque de trabajo. Duración según la prioridad de la petición: b
 src/main.ts              arranque: sondeo de Redmine, reloj de la agenda y API local
 src/redmine/api.ts       API REST de Redmine (lecturas, cambio de estado, subtareas)
 src/redmine/flow.ts      reglas del flujo, catálogos de frases, marcas `Etapa:` y prompts
-src/redmine/cycle.ts     máquina de etapas: plan aprobado → agenda, supervisor, cierre y publicación
+src/redmine/cycle.ts     máquina de etapas: plan aprobado → agenda, arranque en su bloque, supervisor, decisión de cierre y publicación
 src/agenda/api.ts        API de la Agenda (disponibilidad, bloques, sesiones)
 src/agenda/slots.ts      jornada, huecos y reparto en tramos (puro)
 src/agenda/planner.ts    actividades: apartar, mover, sincronizar, esperar para publicar
 src/agenda/http.ts       la agenda para la app y la web (loopback)
 src/agenda/cards.ts      de quién es el turno en cada petición (puro)
+src/agenda/timeline.ts   la jornada completa con sus tiempos libres y la etapa de cada tramo (puro)
 src/agenda/story.ts      el plan en corto, el recorrido con fechas, a quién se espera y qué falta (puro)
 src/poo.ts               cliente mínimo de la pasarela de Poo IA
 bin/redmine_comentar.py  vista previa y publicación del comentario, sin duplicados
@@ -68,12 +87,15 @@ iOS y la web lo consumen desde ahí. La llave de la agenda nunca sale del servid
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /agenda?desde=YYYY-MM-DD&dias=N` | Actividades de Poo, lo demás de la agenda y las peticiones abiertas |
+| `GET /agenda?desde=YYYY-MM-DD&dias=N` | Actividades de Poo, lo demás de la agenda, las peticiones abiertas y `timeline`: la jornada completa de cada día con sus **tiempos libres**, la etapa de cada tramo y los minutos ocupados y libres |
 | `GET /agenda/activities/:id/slots?fecha=…` | Inicios libres de ese día para mover la actividad |
 | `POST /agenda/activities/:id/move {start}` | La mueve aquí y en la agenda |
 | `POST /agenda/activities/:id/cancel` | La quita de aquí y de la agenda |
 | `POST /agenda/issues/:id/plan {hours}` | Aparta tiempo a mano para una petición sin bloque |
-| `POST /agenda/issues/:id/publish` | «Publicar ya»: el cierre no espera al final del bloque |
+| `POST /agenda/issues/:id/publish` | «Publicar ya»: el cierre programado no espera al final del bloque |
+| `POST /agenda/issues/:id/decision {decision, note?}` | Lo que decides sin ir al chat: `aprobar`/`ajustar` el plan; `finalizar`, `programar`, `rechazar`, `esperar` o `retomar` el cierre |
+| `POST /agenda/issues/:id/comment {notes}` | Tu versión del comentario de cierre: es la que se publica |
+| `GET /agenda/issues/:id/readme` | El README para el frontal que dejó el agente |
 | `POST /agenda/sync` | Vuelve a leer la agenda ahora |
 | `POST /agenda/avisos` | Avisos (webhooks) de la agenda, verificados por firma |
 
