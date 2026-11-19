@@ -29,7 +29,7 @@
  * conteo de herramientas. Toda afirmación lleva su fuente (regla de evidencia).
  */
 
-export const DECISION = "Decisiones/2026-11-14-redmine-agenda-y-flujo-de-estados.md";
+export const DECISION = "Decisiones/2026-11-18-redmine-publicar-es-todo-y-reglas-de-flujo.md";
 
 /** Estado al que pasa una asignación recién tomada, mientras se analiza. */
 export const ANALYSIS_STATUS = "En análisis o en revisión";
@@ -164,7 +164,7 @@ export function evidenceRules() {
 /** Cómo trabaja el propietario: va en el prompt inicial. */
 export function operatingRules() {
   return [
-    `Cómo opero (indicación del propietario, 2026-11-12; ${DECISION}):`,
+    `Cómo opero (indicación del propietario, 2026-11-18; ${DECISION}):`,
     "- Sé conciso: mensajes cortos y en llano, sin tablas largas ni relleno. Que en diez segundos entienda qué pidieron, qué vamos a hacer y qué se afecta.",
     "- No me preguntes lo que la incidencia, el Brain o esta conversación ya responden. Para las decisiones abiertas elige la opción más simple que resuelva lo pedido, anótala como supuesto en el plan y sigue. No te compliques.",
     "- Lo que no es nuestro (el frontal, otro equipo, un tercero o el cliente) no se implementa ni se propone implementar: va en el comentario como pendiente de su lado.",
