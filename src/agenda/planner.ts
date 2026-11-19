@@ -318,7 +318,7 @@ export function createPlanner(deps: PlannerDeps) {
      * «Reservar tiempo»: una junta con otras personas (sesión; se les avisa por Slack) o tiempo
      * propio (bloque). Primero dice con qué choca; solo con `create` y sin choques lo aparta.
      */
-    reserve: (input: { title: string; start: number; end: number; people: Person[]; notes?: string[]; create: boolean }) =>
+    reserve: (input: { title: string; start: number; end: number; people: Person[]; notes?: string[]; create: boolean; /** De qué va; sin ella se usa el título (la agenda no acepta una junta sin descripción). */ description?: string }) =>
       exclusive(async (): Promise<Reservation> => {
         const span = { start: input.start, end: input.end };
         const minutes = Math.round((span.end - span.start) / MINUTE);
@@ -385,7 +385,7 @@ export function createPlanner(deps: PlannerDeps) {
             if (kind === "sesion") {
               const sesion = await agenda.crearSesion({
                 titulo: input.title.slice(0, 120),
-                descripcion: parts.length > 1 ? `Parte ${i + 1} de ${parts.length}.` : undefined,
+                descripcion: [(input.description?.trim() || input.title).slice(0, 500), parts.length > 1 ? `Parte ${i + 1} de ${parts.length}.` : ""].filter(Boolean).join("\n"),
                 inicio: iso(part.start),
                 duracion_minutos: Math.round((part.end - part.start) / MINUTE),
                 invitados: input.people.map((p) => p.email),

@@ -42,7 +42,7 @@ const MONTHS: Record<string, number> = {
 const NOUNS = ["junta", "reunión", "reunion", "sesión", "sesion", "llamada", "cita", "videollamada", "call"];
 /** Palabras que no son el nombre de nadie después de «con». */
 const STOP =
-  "el|la|los|las|un|una|de|del|a|al|para|por|sobre|tema|hoy|mañana|pasado|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|en|desde|entre|que|t[ií]tulo|titulad[ao]|llamad[ao]|nombre|mi|y|e|duraci[oó]n";
+  "el|la|los|las|un|una|de|del|a|al|para|por|sobre|tema|hoy|mañana|pasado|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|en|desde|entre|que|t[ií]tulo|titulad[ao]|llamad[ao]|nombre|motivo|asunto|mi|y|e|duraci[oó]n";
 const SENTINEL = "\u0001";
 
 const plain = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
@@ -93,7 +93,7 @@ export function parseQuick(text: string, now: number, timeZone: string): QuickPa
   // El título, si lo dijo con su marca, es todo lo que sigue («con el título de …», «titulada …»).
   let head = raw;
   let tail: string | undefined;
-  const marker = new RegExp(`[,;]?\\s*${L}(?:(?:con|y|de|por)\\s+)?(?:el\\s+)?(?:t[ií]tulo|titulad[ao]|nombre)${R}\\s*(?:de|que\\s+diga|es|sea|ser[aá])?\\s*:?\\s*`, "iu").exec(raw);
+  const marker = new RegExp(`[,;]?\\s*${L}(?:(?:con|y|de|por)\\s+)?(?:el\\s+)?(?:t[ií]tulo|titulad[ao]|nombre|motivo|asunto)${R}\\s*(?:de|que\\s+diga|es|sea|ser[aá])?\\s*:?\\s*`, "iu").exec(raw);
   if (marker) {
     head = raw.slice(0, marker.index);
     tail = raw.slice(marker.index + marker[0].length);
@@ -238,7 +238,7 @@ export function parseQuick(text: string, now: number, timeZone: string): QuickPa
   };
   let title = maskedTail !== undefined ? tidy(maskedTail) : quoted ? quoted[0]!.toUpperCase() + quoted.slice(1) : undefined;
   if (!title) {
-    const about = new RegExp(`${L}(?:para|sobre|tema(?:\\s+de)?|acerca\\s+de|motivo)\\s+((?!${SENTINEL})[^${SENTINEL}]{3,})`, "iu").exec(maskedHead);
+    const about = new RegExp(`${L}(?:para|sobre|tema(?:\\s+de)?|acerca\\s+de)\\s+((?!${SENTINEL})[^${SENTINEL}]{3,})`, "iu").exec(maskedHead);
     if (about) title = tidy(about[1]!.replace(new RegExp(`^(?:ver|revisar|hablar\\s+de|platicar\\s+de)${R}`, "iu"), (m) => m));
   }
   const noun = NOUNS.find((n) => new RegExp(`${L}${n}${R}`, "iu").test(raw));

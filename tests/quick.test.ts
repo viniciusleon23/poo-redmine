@@ -91,6 +91,17 @@ test("título: con su marca, entre comillas, tras «para» o «sobre», o ningun
   assert.deepEqual(tailTime.people, ["gigdem"]);
 });
 
+test("la frase que falló el 18/11: dos renglones, la hora dicha dos veces y «con el motivo de…»", () => {
+  const r = p("Haz una junta mañana a las 9 am\nDe 9 a 11 con el motivo de hacer o revisar los user de honda con Gigdem");
+  assert.equal(r.date, "2026-11-19");
+  assert.deepEqual([hm(r.startMinute), hm(r.endMinute)], ["09:00", "11:00"]);
+  assert.deepEqual(r.people, ["Gigdem"]);
+  assert.equal(r.title, "Hacer o revisar los user de honda");
+  assert.deepEqual(r.notes, []);
+  assert.equal(p("junta mañana a las 10 con Daniel, asunto: cierre de mes").title, "Cierre de mes");
+  assert.deepEqual(p("junta mañana a las 10 con Daniel, asunto: cierre de mes").people, ["Daniel"]);
+});
+
 test("lo que no se entiende se dice", () => {
   assert.throws(() => p("hola"), QuickError);
   assert.throws(() => p(""), QuickError);

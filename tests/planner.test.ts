@@ -59,6 +59,8 @@ function scene(startAt = at(14, 17)) {
       return { sesiones: sesiones.map((s) => ({ ...s })), bloques: bloques.filter((b) => b.activo).map((b) => ({ ...b })) };
     },
     crearSesion: async (input) => {
+      // Como la agenda real: una junta sin descripción se rechaza.
+      if (!input.descripcion?.trim()) throw new AgendaError(422, "validacion", "Explica brevemente qué se va a tratar.", undefined, "descripcion");
       const start = Date.parse(input.inicio);
       const end = start + input.duracion_minutos * MINUTE;
       for (const who of [ME, ...input.invitados]) if (clash(who, start, end)) throw new AgendaError(409, "horario_ocupado", "El horario choca con la agenda.", [{ who }]);
@@ -366,6 +368,7 @@ test("reservar tiempo: primero dice si choca, después crea la junta (sesión) y
   assert.equal(done.created, true);
   assert.deepEqual(s.calls.filter((c) => c.startsWith("sesion")), ["sesion 17 09:00 120"]);
   assert.equal(s.sesiones[0]!.titulo, "Ver configurador de usuarios");
+  assert.equal(s.sesiones[0]!.descripcion, "Ver configurador de usuarios", "la agenda exige decir de qué va: sin motivo aparte, el título");
   assert.deepEqual(s.sesiones[0]!.asistentes.map((a) => a.correo), [ME, DANIEL.email]);
   const item = s.planner.view(at(17, 0), at(18, 0)).find((i) => i.kind === "sesion")!;
   assert.equal(item.source, "agenda", "es una junta tuya, no trabajo de Poo");
@@ -410,6 +413,7 @@ test("reservar tiempo: un choque se dice y no se crea; solo es tiempo apartado; 
   const long = await s.planner.reserve({ title: "Taller", start: at(18, 9), end: at(18, 12, 30), people: [DANIEL], create: true });
   assert.deepEqual(spans(long.parts), ["18 09:00–18 11:00", "18 11:00–18 12:30"]);
   assert.deepEqual(s.calls.filter((c) => c.startsWith("sesion")), ["sesion 18 09:00 120", "sesion 18 11:00 90"]);
+  assert.deepEqual(s.sesiones.map((x) => x.descripcion), ["Taller\nParte 1 de 2.", "Taller\nParte 2 de 2."]);
 
   // Lo que ya pasó no se reserva; y el primer hueco de un día respeta lo ocupado.
   await assert.rejects(() => s.planner.reserve({ title: "x", start: at(14, 9), end: at(14, 10), people: [], create: false }), PlanError);
