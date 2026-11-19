@@ -722,6 +722,8 @@ async function startScheduled(only?: string) {
     if (only !== undefined && id !== only) continue;
     if (!linked.taskId || linked.gone || linked.closedNoted || !linked.scheduled) continue;
     if (linked.startedPlan === linked.scheduled.planAt) continue;
+    // Sin tiempo apartado vigente (el bloque se quitó o se canceló) no hay nada que declarar en Redmine.
+    if (!planner.workPlan(id)) continue;
     // Lo agendado antes de este flujo (sin aprobación registrada) conserva la regla anterior: al empezar su bloque.
     if (linked.planApproved !== linked.scheduled.planAt && !planner.workStarted(id)) continue;
     await startIssue(id, linked).then(
