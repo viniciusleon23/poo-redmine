@@ -69,6 +69,7 @@ src/agenda/planner.ts    actividades: apartar, mover, sincronizar, esperar para 
 src/agenda/http.ts       la agenda para la app y la web (loopback)
 src/agenda/cards.ts      de quién es el turno en cada petición (puro)
 src/agenda/timeline.ts   la jornada completa con sus tiempos libres y la etapa de cada tramo (puro)
+src/agenda/quick.ts      «Reservar tiempo»: de una frase al día, las horas, con quién y el título (puro)
 src/agenda/story.ts      el plan en corto, el recorrido con fechas, a quién se espera y qué falta (puro)
 src/poo.ts               cliente mínimo de la pasarela de Poo IA
 bin/redmine_comentar.py  vista previa y publicación del comentario, sin duplicados
@@ -96,6 +97,7 @@ iOS y la web lo consumen desde ahí. La llave de la agenda nunca sale del servid
 | `POST /agenda/issues/:id/decision {decision, note?}` | Lo que decides sin ir al chat: `aprobar`/`ajustar` el plan; `finalizar`, `programar`, `rechazar`, `esperar` o `retomar` el cierre |
 | `POST /agenda/issues/:id/comment {notes}` | Tu versión del comentario de cierre: es la que se publica |
 | `GET /agenda/issues/:id/readme` | El README para el frontal que dejó el agente |
+| `POST /agenda/reservar {text, crear?}` | «Reservar tiempo» con una frase («junta mañana con Gigdem de 9 a 11, título: ver configurador de usuarios»): sin `crear` dice qué entendió y si choca; con `crear`, crea la junta (sesión, avisa por Slack) o aparta tiempo propio |
 | `POST /agenda/sync` | Vuelve a leer la agenda ahora |
 | `POST /agenda/avisos` | Avisos (webhooks) de la agenda, verificados por firma |
 

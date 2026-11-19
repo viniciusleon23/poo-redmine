@@ -351,3 +351,68 @@ test("un aviso de la agenda solo vale con su firma y dentro de cinco minutos", (
   assert.equal(validWebhook(secret, "t=abc", body, t), false);
   assert.equal(validWebhook(secret, "", body, t), false);
 });
+
+test("reservar tiempo: primero dice si choca, después crea la junta (sesión) y queda movible como tuya, no de Poo", async () => {
+  const s = scene();
+  const input = { title: "Ver configurador de usuarios", start: at(17, 9), end: at(17, 11), people: [DANIEL] };
+  const preview = await s.planner.reserve({ ...input, create: false });
+  assert.equal(preview.created, false);
+  assert.equal(preview.kind, "sesion");
+  assert.deepEqual(preview.conflicts, []);
+  assert.deepEqual(spans(preview.parts), ["17 09:00–17 11:00"]);
+  assert.equal(s.calls.filter((c) => c.startsWith("sesion")).length, 0, "interpretar no crea nada");
+
+  const done = await s.planner.reserve({ ...input, create: true });
+  assert.equal(done.created, true);
+  assert.deepEqual(s.calls.filter((c) => c.startsWith("sesion")), ["sesion 17 09:00 120"]);
+  assert.equal(s.sesiones[0]!.titulo, "Ver configurador de usuarios");
+  assert.deepEqual(s.sesiones[0]!.asistentes.map((a) => a.correo), [ME, DANIEL.email]);
+  const item = s.planner.view(at(17, 0), at(18, 0)).find((i) => i.kind === "sesion")!;
+  assert.equal(item.source, "agenda", "es una junta tuya, no trabajo de Poo");
+  assert.equal(item.title, "Ver configurador de usuarios");
+  assert.equal(item.issueId, undefined);
+  assert.equal(item.movable, true);
+  assert.deepEqual(item.with, ["Daniel"]);
+  assert.equal(s.planner.view(at(17, 0), at(18, 0)).length, 1, "no se duplica con lo que ya trae la agenda");
+  // No cuenta como trabajo de ninguna petición.
+  assert.equal(s.planner.workPlan(0), undefined);
+  assert.equal(s.planner.gate(0).wait, false);
+
+  // Se mueve y se quita como cualquier actividad.
+  await s.planner.move(item.activityId!, at(17, 12));
+  assert.equal(hm(s.planner.view(at(17, 0), at(18, 0))[0]!.start), "17 12:00");
+  await s.planner.cancel(item.activityId!);
+  assert.equal(s.sesiones[0]!.estado, "cancelada");
+});
+
+test("reservar tiempo: un choque se dice y no se crea; solo es tiempo apartado; una junta larga va en tramos", async () => {
+  const s = scene();
+  // 15:30–16:30 del martes choca con tu comida (15–16).
+  const clash = await s.planner.reserve({ title: "Revisión", start: at(17, 15, 30), end: at(17, 16, 30), people: [DANIEL], create: true });
+  assert.equal(clash.created, false);
+  assert.deepEqual(clash.conflicts, ["Tú: comida, 15:00–16:00"]);
+  assert.equal(s.sesiones.length, 0);
+
+  // Sin nadie más: tiempo apartado en tu agenda.
+  const own = await s.planner.reserve({ title: "Revisar el reporte de ventas", start: at(17, 12), end: at(17, 13), people: [], create: true });
+  assert.equal(own.kind, "bloque");
+  assert.equal(own.created, true);
+  assert.deepEqual(s.calls.filter((c) => c.startsWith("libre")), ["libre 17 12:00 60"]);
+  assert.equal(s.bloques[0]!.titulo, "Revisar el reporte de ventas");
+  const item = s.planner.view(at(17, 0), at(18, 0))[0]!;
+  assert.deepEqual([item.kind, item.source, item.title, item.movable], ["bloque", "agenda", "Revisar el reporte de ventas", true]);
+  // Lo ya reservado es un choque para lo siguiente.
+  const again = await s.planner.reserve({ title: "Otra", start: at(17, 12, 30), end: at(17, 13, 30), people: [], create: true });
+  assert.equal(again.created, false);
+  assert.match(again.conflicts[0]!, /^Tú: /);
+
+  // 3 h 30 con Daniel: la agenda admite sesiones de hasta 2 h → 2 h + 1 h 30.
+  const long = await s.planner.reserve({ title: "Taller", start: at(18, 9), end: at(18, 12, 30), people: [DANIEL], create: true });
+  assert.deepEqual(spans(long.parts), ["18 09:00–18 11:00", "18 11:00–18 12:30"]);
+  assert.deepEqual(s.calls.filter((c) => c.startsWith("sesion")), ["sesion 18 09:00 120", "sesion 18 11:00 90"]);
+
+  // Lo que ya pasó no se reserva; y el primer hueco de un día respeta lo ocupado.
+  await assert.rejects(() => s.planner.reserve({ title: "x", start: at(14, 9), end: at(14, 10), people: [], create: false }), PlanError);
+  assert.equal(hm((await s.planner.firstFree([], "2026-11-17", 60))!), "17 09:00");
+  assert.equal(hm((await s.planner.firstFree([DANIEL.email], "2026-11-18", 120))!), "18 12:30");
+});

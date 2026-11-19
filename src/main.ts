@@ -36,8 +36,9 @@ import type { HistoryEvent } from "./agenda/story.ts";
 import { startAgendaHttp } from "./agenda/http.ts";
 import type { IssueCard } from "./agenda/http.ts";
 import { PlanError, createPlanner, emptyState, parseEstimate, parseFront, sessionMinutes } from "./agenda/planner.ts";
-import type { Planner, PlannerState } from "./agenda/planner.ts";
-import { dateKey, parseClock } from "./agenda/slots.ts";
+import type { Person, Planner, PlannerState, Reservation } from "./agenda/planner.ts";
+import { QuickError, parseQuick } from "./agenda/quick.ts";
+import { dateKey, parseClock, zonedMs } from "./agenda/slots.ts";
 import type { WorkWeek } from "./agenda/slots.ts";
 import { Poo } from "./poo.ts";
 import { createRedmine, fieldValue, lastJournalId, notesFromOthers } from "./redmine/api.ts";
@@ -157,9 +158,10 @@ const save = () => writeJson(stateFile, state);
 const agendaFile = resolve(stateDir, "agenda.json");
 const plannerState: PlannerState = existsSync(agendaFile) ? { ...emptyState(), ...JSON.parse(readFileSync(agendaFile, "utf8")) } : emptyState();
 const agendaKey = process.env.AGENDA_LLAVE;
-const planner: Planner | undefined = agendaKey
+const agendaApi = agendaKey ? createAgenda({ url: process.env.AGENDA_URL ?? "https://wscapnet.com.mx:9444/api/v1", key: agendaKey, user: need("AGENDA_USUARIO") }) : undefined;
+const planner: Planner | undefined = agendaApi
   ? createPlanner({
-      agenda: createAgenda({ url: process.env.AGENDA_URL ?? "https://wscapnet.com.mx:9444/api/v1", key: agendaKey, user: need("AGENDA_USUARIO") }),
+      agenda: agendaApi,
       week,
       state: plannerState,
       now: Date.now,
@@ -907,6 +909,71 @@ function setComment(issueId: number, notes: string) {
   log(`#${issueId}: el propietario editó el comentario de cierre en la Agenda (${text.length} caracteres)`);
 }
 
+// ---------- reservar tiempo con una frase ----------
+
+const plainText = (v: string) => v.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+const capital = (v: string) => (v ? v[0]!.toUpperCase() + v.slice(1) : v);
+
+/** A quién corresponde cada nombre de la frase: primero los conocidos (frontal), después la agenda del equipo. */
+async function resolvePeople(names: string[]): Promise<Person[]> {
+  const out: Person[] = [];
+  for (const said of names) {
+    const wanted = plainText(said);
+    const tokens = wanted.split(/\s+/).filter(Boolean);
+    const known = frontPeople.find((p) => p.key === wanted || plainText(p.name) === wanted || (tokens.length === 1 && plainText(p.name).startsWith(wanted) && wanted.length >= 3));
+    if (known) {
+      if (!out.some((o) => o.email === known.email)) out.push({ name: known.name, email: known.email });
+      continue;
+    }
+    let found: { correo: string; nombre: string }[];
+    try {
+      found = await agendaApi!.personas(said);
+    } catch (err) {
+      throw new PlanError("agenda", `No pude buscar a «${said}» en la agenda del equipo (${errorText(err)}).`);
+    }
+    const matches = found.filter((person) => {
+      if (person.correo === agendaApi!.user) return false;
+      const words = plainText(person.nombre).split(/\s+/);
+      return tokens.every((t) => words.some((w) => w.startsWith(t)));
+    });
+    if (!matches.length) throw new PlanError("datos", `No encontré a «${said}» en la agenda del equipo. Dime su nombre como aparece ahí.`);
+    if (matches.length > 1) throw new PlanError("datos", `Hay varias personas que coinciden con «${said}»: ${matches.slice(0, 4).map((m) => m.nombre).join(", ")}. Dime también el apellido.`);
+    const person = matches[0]!;
+    if (!out.some((o) => o.email === person.correo)) out.push({ name: capital(person.nombre.split(/\s+/)[0] ?? said), email: person.correo });
+  }
+  return out;
+}
+
+/**
+ * «Reservar tiempo»: de la frase del propietario a una junta (con otras personas) o a tiempo
+ * apartado (solo). Sin `create` solo dice qué entendió y si choca con algo.
+ */
+async function reserve(text: string, create: boolean): Promise<Reservation> {
+  if (!planner || !agendaApi) throw new PlanError("agenda", "La agenda no está configurada.");
+  let parsed;
+  try {
+    parsed = parseQuick(text, Date.now(), week.timeZone);
+  } catch (err) {
+    if (err instanceof QuickError) throw new PlanError("datos", err.message);
+    throw err;
+  }
+  const people = await resolvePeople(parsed.people);
+  const notes = [...parsed.notes];
+  const [y, m, d] = parsed.date.split("-").map(Number) as [number, number, number];
+  let minutes = parsed.endMinute !== undefined && parsed.startMinute !== undefined ? parsed.endMinute - parsed.startMinute : (parsed.minutes ?? 60);
+  let start: number;
+  if (parsed.startMinute !== undefined) start = zonedMs(y, m, d, Math.floor(parsed.startMinute / 60), parsed.startMinute % 60, week.timeZone);
+  else {
+    minutes = Math.ceil(minutes / 30) * 30;
+    const first = await planner.firstFree(people.map((p) => p.email), parsed.date, minutes);
+    if (first === undefined) throw new PlanError("sin_hueco", `No hay ${duration(minutes)} libres ${people.length ? `en común con ${people.map((p) => p.name).join(" y ")} ` : ""}ese día dentro de tu jornada. Dime otra fecha o una hora.`);
+    start = first;
+    notes.push(`No dijiste la hora: tomé el primer hueco libre (${hour(first)}).`);
+  }
+  const title = parsed.title ?? (people.length ? `${capital(parsed.noun ?? "junta")} con ${people.map((p) => p.name).join(" y ")}` : "Tiempo reservado");
+  return planner.reserve({ title, start, end: start + minutes * 60_000, people, notes, create });
+}
+
 function httpToken() {
   const file = resolve(process.env.AGENDA_HTTP_TOKEN_FILE ?? `${process.env.HOME}/.config/poo-redmine/http-token`);
   if (!existsSync(file)) {
@@ -952,6 +1019,7 @@ function serveAgenda() {
       }
     },
     setComment: async (issueId, notes) => setComment(issueId, notes),
+    reserve,
     readme: async (issueId) => {
       const directory = state.issues[String(issueId)]?.directory;
       const doc = directory ? findReadme(directory) : undefined;

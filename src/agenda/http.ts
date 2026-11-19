@@ -11,6 +11,7 @@
  *   POST /agenda/issues/:id/decision {decision, note?}   lo que decides sin ir al chat: aprobar/ajustar el plan; finalizar, programar, rechazar, esperar o retomar el cierre
  *   POST /agenda/issues/:id/comment  {notes}    tu versión del comentario de cierre: es la que se publica
  *   GET  /agenda/issues/:id/readme              el README para el frontal que dejó Poo, para compartirlo
+ *   POST /agenda/reservar {text, crear?}        «Reservar tiempo» con una frase: sin `crear` dice qué entendió y si choca; con `crear`, lo aparta
  *   POST /agenda/sync                           vuelve a leer la agenda ahora
  *   POST /agenda/avisos                         avisos (webhooks) de la agenda, verificados por firma
  */
@@ -19,7 +20,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { CardState, Turn } from "./cards.ts";
 import { PlanError } from "./planner.ts";
-import type { AgendaItem, Planner } from "./planner.ts";
+import type { AgendaItem, Planner, Reservation } from "./planner.ts";
 import { dateKey, dayStart } from "./slots.ts";
 import { buildTimeline } from "./timeline.ts";
 import type { DayTimeline } from "./timeline.ts";
@@ -140,6 +141,8 @@ export interface AgendaHttpOptions {
   setComment?(issueId: number, notes: string): Promise<void>;
   /** README para el frontal de esa petición. */
   readme?(issueId: number): Promise<{ name: string; text: string } | undefined>;
+  /** «Reservar tiempo» con una frase; sin `create` solo la interpreta. */
+  reserve?(text: string, create: boolean): Promise<Reservation>;
 }
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -289,6 +292,13 @@ export function startAgendaHttp(options: AgendaHttpOptions) {
       if (!(hours >= 0.5 && hours <= 40)) throw new PlanError("datos", "Las horas deben estar entre 0.5 y 40.");
       await options.plan(id, Math.round(hours * 60));
       return send(200, { data: { ok: true } });
+    }
+
+    if (req.method === "POST" && path === "/agenda/reservar") {
+      const body = JSON.parse((await readBody(req)) || "{}") as { text?: unknown; crear?: unknown };
+      const text = typeof body.text === "string" ? body.text.trim() : "";
+      if (!text || text.length > 500 || !options.reserve) throw new PlanError("datos", "Dime qué reservo, en una frase.");
+      return send(200, { data: await options.reserve(text, body.crear === true) });
     }
 
     if (req.method === "POST" && path === "/agenda/sync") {

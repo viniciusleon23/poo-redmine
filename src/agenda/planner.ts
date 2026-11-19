@@ -12,18 +12,22 @@
  */
 import { AgendaError, SESSION_MINUTES } from "./api.ts";
 import type { Agenda, Bloque, Ocupado, Sesion } from "./api.ts";
-import { MINUTE, allocate, dateKey, dayStart, isoZoned, overlaps, startsFor, subtract, workWindows } from "./slots.ts";
+import { MINUTE, allocate, dateKey, dayStart, isoZoned, overlaps, startsFor, subtract, workWindows, zonedParts } from "./slots.ts";
 import type { Interval, WorkWeek } from "./slots.ts";
 
-export type ActivityKind = "trabajo" | "sesion";
+/** `reserva`: tiempo que el propietario apartó para sí mismo desde «Reservar tiempo» (sin petición). */
+export type ActivityKind = "trabajo" | "sesion" | "reserva";
 export type ActivityState = "planificada" | "en_curso" | "terminada" | "cancelada";
 export type Person = { name: string; email: string };
 
 export interface Activity {
   id: string;
   kind: ActivityKind;
+  /** Petición de Redmine; 0 en lo que el propietario reservó a mano (juntas y tiempo propio). */
   issueId: number;
   subject: string;
+  /** Título de una reserva del propietario. */
+  title?: string;
   priority: string;
   /** Conversación de Poo IA de la petición. */
   taskId?: string;
@@ -102,11 +106,29 @@ export interface AgendaItem {
   note?: string;
 }
 
+/** Lo que se va a reservar (o se reservó) con una frase. */
+export interface Reservation {
+  kind: "sesion" | "bloque";
+  title: string;
+  start: number;
+  end: number;
+  /** Tramos, cuando una junta larga se parte (la agenda admite sesiones de hasta 2 h). */
+  parts: Interval[];
+  people: Person[];
+  /** Con qué choca, dicho para el propietario; vacío si el horario está libre. */
+  conflicts: string[];
+  /** Lo que se supuso al leer la frase. */
+  notes: string[];
+  created: boolean;
+}
+
 const STEP = 30;
+const BUSY_LABEL: Record<string, string> = { sesion: "junta", externo: "compromiso", ausencia: "ausencia", comida: "comida", festivo: "festivo" };
 const active = (a: Activity) => a.state === "planificada" || a.state === "en_curso";
 const ms = (iso: string) => Date.parse(iso);
 const busyOf = (ocupado: Ocupado[]): Interval[] => ocupado.map((o) => ({ start: ms(o.inicio), end: ms(o.fin) }));
 const sameSpan = (a: Interval, b: Interval) => Math.abs(a.start - b.start) < MINUTE && Math.abs(a.end - b.end) < MINUTE;
+const tag = (a: Pick<Activity, "issueId" | "title" | "subject">) => (a.issueId ? `#${a.issueId}` : `reserva «${(a.title ?? a.subject).slice(0, 40)}»`);
 
 export function createPlanner(deps: PlannerDeps) {
   const { agenda, week, state, log } = deps;
@@ -144,8 +166,12 @@ export function createPlanner(deps: PlannerDeps) {
   }
 
   /** Aparta un tramo: ligado a la petición si la agenda lo permite; si no, bloque libre con su enlace. */
-  async function block(a: Pick<Activity, "id" | "issueId" | "subject">, span: Interval, libre: boolean) {
+  async function block(a: Pick<Activity, "id" | "issueId" | "subject" | "title">, span: Interval, libre: boolean) {
     const minutes = Math.round((span.end - span.start) / MINUTE);
+    if (!a.issueId) {
+      const b = await agenda.apartarLibre({ titulo: (a.title ?? a.subject).slice(0, 120), inicio: iso(span.start), duracion_minutos: minutes, referencia: `poo-${a.id}` });
+      return { type: "bloque" as const, id: b.id, libre: true };
+    }
     if (!libre) {
       try {
         const b = await agenda.apartarPeticion(a.issueId, iso(span.start), minutes);
@@ -276,6 +302,107 @@ export function createPlanner(deps: PlannerDeps) {
         }
       }),
 
+    /** Primer inicio de ese día en el que caben `minutes` para el propietario y esas personas, dentro de la jornada. */
+    async firstFree(emails: string[], date: string, minutes: number): Promise<number | undefined> {
+      const from = Math.max(dayStart(date, week.timeZone), earliest());
+      const to = dayStart(date, week.timeZone) + 86_400_000;
+      if (to <= from) return undefined;
+      try {
+        return startsFor(await free([agenda.user, ...emails], from, to), minutes, STEP)[0];
+      } catch (err) {
+        throw asPlanError(err);
+      }
+    },
+
+    /**
+     * «Reservar tiempo»: una junta con otras personas (sesión; se les avisa por Slack) o tiempo
+     * propio (bloque). Primero dice con qué choca; solo con `create` y sin choques lo aparta.
+     */
+    reserve: (input: { title: string; start: number; end: number; people: Person[]; notes?: string[]; create: boolean }) =>
+      exclusive(async (): Promise<Reservation> => {
+        const span = { start: input.start, end: input.end };
+        const minutes = Math.round((span.end - span.start) / MINUTE);
+        if (!(minutes >= 15 && minutes <= 12 * 60)) throw new PlanError("datos", "La duración va de 15 minutos a 12 horas.");
+        if (span.start < deps.now()) throw new PlanError("datos", "Ese horario ya pasó.");
+        const kind: Reservation["kind"] = input.people.length ? "sesion" : "bloque";
+        // Una sesión dura lo que la agenda admite (hasta 2 h): una junta larga va en tramos seguidos.
+        const parts: Interval[] = [];
+        if (kind === "sesion") {
+          let cursor = span.start;
+          let remaining = Math.ceil(minutes / 15) * 15;
+          while (remaining > 0) {
+            const take = SESSION_MINUTES.find((size) => size <= remaining) ?? 15;
+            parts.push({ start: cursor, end: cursor + take * MINUTE });
+            cursor += take * MINUTE;
+            remaining -= take;
+          }
+        } else parts.push(span);
+        const whole = { start: span.start, end: parts.at(-1)!.end };
+        const hm = (t: number) => {
+          const z = zonedParts(t, week.timeZone);
+          return `${String(z.hour).padStart(2, "0")}:${String(z.minute).padStart(2, "0")}`;
+        };
+        try {
+          const day = dayStart(dateKey(whole.start, week.timeZone), week.timeZone);
+          const availability = await agenda.disponibilidad([agenda.user, ...input.people.map((p) => p.email)], iso(day), iso(day + 86_400_000));
+          const conflicts: string[] = [];
+          const notes = [...(input.notes ?? [])];
+          for (const person of availability) {
+            const mine = person.correo === agenda.user;
+            const who = mine ? "Tú" : (input.people.find((p) => p.email === person.correo)?.name ?? person.nombre.split(" ")[0] ?? person.correo);
+            for (const o of person.ocupado) {
+              const busy = { start: ms(o.inicio), end: ms(o.fin) };
+              if (!overlaps(busy, whole)) continue;
+              // Fuera del horario de esa persona no es un choque: se avisa y decide la agenda.
+              if (o.tipo === "fuera") {
+                const note = `${mine ? "Queda fuera de tu jornada" : `Queda fuera del horario de ${who}`}.`;
+                if (!notes.includes(note)) notes.push(note);
+                continue;
+              }
+              const what = o.titulo?.trim() || BUSY_LABEL[o.tipo] || "ocupado";
+              conflicts.push(`${who}: ${what}, ${hm(Math.max(busy.start, day))}–${hm(Math.min(busy.end, day + 86_400_000 - MINUTE))}`);
+            }
+          }
+          const result: Reservation = { kind, title: input.title, start: whole.start, end: whole.end, parts, people: input.people, conflicts, notes, created: false };
+          if (!input.create || conflicts.length) return result;
+          for (const [i, part] of parts.entries()) {
+            const a: Activity = {
+              id: `act_${deps.uuid().slice(0, 8)}`,
+              kind: kind === "sesion" ? "sesion" : "reserva",
+              issueId: 0,
+              subject: input.title,
+              title: input.title,
+              priority: "",
+              start: part.start,
+              end: part.end,
+              part: i + 1,
+              parts: parts.length,
+              with: input.people.length ? input.people : undefined,
+              state: "planificada",
+              createdAt: deps.now(),
+              updatedAt: deps.now(),
+            };
+            if (kind === "sesion") {
+              const sesion = await agenda.crearSesion({
+                titulo: input.title.slice(0, 120),
+                descripcion: parts.length > 1 ? `Parte ${i + 1} de ${parts.length}.` : undefined,
+                inicio: iso(part.start),
+                duracion_minutos: Math.round((part.end - part.start) / MINUTE),
+                invitados: input.people.map((p) => p.email),
+              });
+              a.remote = { type: "sesion", id: sesion.id };
+            } else a.remote = await block(a, part, true);
+            state.activities.push(a);
+            deps.save();
+          }
+          log(`reserva del propietario: ${kind === "sesion" ? `junta con ${input.people.map((p) => p.name).join(" y ")}` : "tiempo propio"} «${input.title.slice(0, 60)}», ${iso(whole.start)} (${minutes} min)`);
+          return { ...result, created: true };
+        } catch (err) {
+          deps.save();
+          throw asPlanError(err);
+        }
+      }),
+
     /** Inicios libres de un día para mover esa actividad (cada 30 minutos). */
     async slots(activityId: string, date: string): Promise<number[]> {
       const a = state.activities.find((x) => x.id === activityId);
@@ -332,7 +459,7 @@ export function createPlanner(deps: PlannerDeps) {
           a.note = "movida por ti";
           touch(a);
           deps.save();
-          log(`#${a.issueId}: ${a.kind} movido a ${iso(a.start)}`);
+          log(`${tag(a)}: ${a.kind} movido a ${iso(a.start)}`);
           return a;
         } catch (err) {
           throw asPlanError(err);
@@ -442,7 +569,7 @@ export function createPlanner(deps: PlannerDeps) {
               a.state = "cancelada";
               a.note = "quitada desde la agenda";
               touch(a);
-              log(`#${a.issueId}: ${a.kind} quitado desde la agenda`);
+              log(`${tag(a)}: ${a.kind} quitado desde la agenda`);
               continue;
             }
             const span = { start: ms(found.inicio), end: ms(found.fin) };
@@ -451,7 +578,7 @@ export function createPlanner(deps: PlannerDeps) {
               a.end = span.end;
               a.note = "movida desde la agenda";
               touch(a);
-              log(`#${a.issueId}: ${a.kind} movido desde la agenda a ${iso(a.start)}`);
+              log(`${tag(a)}: ${a.kind} movido desde la agenda a ${iso(a.start)}`);
             }
           }
           // Lo ocupado de la semana (la agenda da hasta 14 días por consulta): si falla, se conserva la foto anterior.
@@ -475,17 +602,19 @@ export function createPlanner(deps: PlannerDeps) {
       for (const a of state.activities) {
         if (a.remote) mine.add(`${a.remote.type}:${a.remote.id}`);
         if (a.end <= from || a.start >= to || (a.state === "cancelada" && !a.note?.includes("agenda"))) continue;
+        // Lo que el propietario reservó a mano (sin petición) es suyo, no trabajo de Poo; se puede mover y quitar igual.
+        const own = !a.issueId;
         items.push({
           id: a.id,
-          source: "poo",
-          kind: a.kind,
-          title: a.kind === "sesion" ? `Sesión con ${(a.with ?? []).map((p) => p.name).join(" y ")} · #${a.issueId}` : `#${a.issueId} ${a.subject}`,
+          source: own ? "agenda" : "poo",
+          kind: a.kind === "reserva" ? "bloque" : a.kind,
+          title: own ? (a.title ?? a.subject) : a.kind === "sesion" ? `Sesión con ${(a.with ?? []).map((p) => p.name).join(" y ")} · #${a.issueId}` : `#${a.issueId} ${a.subject}`,
           start: a.start,
           end: a.end,
           state: a.state,
           activityId: a.id,
-          issueId: a.issueId,
-          issueUrl: deps.issueUrl(a.issueId),
+          issueId: own ? undefined : a.issueId,
+          issueUrl: own ? undefined : deps.issueUrl(a.issueId),
           taskId: a.taskId,
           priority: a.priority,
           part: a.part,
