@@ -648,9 +648,11 @@ async function refreshStories(issues: Issue[]) {
   let changed = false;
   for (const i of issues) {
     const linked = state.issues[i.id];
-    if (!linked?.taskId || linked.storyAt !== undefined) continue;
+    if (!linked?.taskId || (linked.storyAt !== undefined && linked.directory !== undefined)) continue;
     const snap = (await poo.task(linked.taskId).catch(() => undefined)) as unknown as Snapshot | undefined;
     if (!snap) continue;
+    // La carpeta de la conversación: ahí deja el agente el README para el frontal.
+    linked.directory = snap.task.directory;
     const story = storyOf(snap);
     if (story.ownerSaid) linked.ownerSaid = story.ownerSaid;
     if (story.missing) linked.missing = story.missing;
@@ -780,7 +782,8 @@ function issueCards(): IssueCard[] {
     const publishedNow = Boolean(linked?.published && linked.closeAt && linked.published.at >= linked.closeAt);
     const closing = Boolean(linked?.closeAt && !linked.review && !linked.pending && !linked.hold && !publishedNow && !linked.releasedAt && (stage === "EJECUTADO" || stage === "RESPUESTA" || stage === "CIERRE"));
     const planPending = Boolean(stage === "PLAN" && linked?.planAt && linked.scheduled?.planAt !== linked.planAt);
-    const pausedClose = Boolean(stage === "EN ESPERA" && linked?.closeAt && !publishedNow && linked.pausedFrom);
+    // Un cierre que dejaste en espera (desde la Agenda o en el chat) se retoma con un botón.
+    const pausedClose = Boolean(stage === "EN ESPERA" && linked?.closeAt && !publishedNow && linked.approved && !linked.review && !linked.pending);
     const early = closing && (linked?.kind ?? "trabajo") === "trabajo" ? planner?.gate(id) : undefined;
     const decisions: IssueCard["decisions"] = planPending
       ? ["aprobar", "ajustar"]
