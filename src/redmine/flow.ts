@@ -39,6 +39,16 @@ export const START_STATUS = "En curso";
 export const HANDOFF_STATUS = "Terminado por Desarrollo";
 /** Estados «nuestros»: desde ellos una respuesta a un comentario devuelve la petición a entregada. */
 export const OURS_STATUSES = ["Nuevo o Pendiente", ANALYSIS_STATUS, START_STATUS, "Comentarios o no aprobado"];
+/**
+ * Estados a los que Consultoría o Calidad **regresan** una entrega: ya no está en validación,
+ * falta algo de nuestro lado. Solo cuentan para la agenda (de quién es el turno); el vigilante
+ * no mueve el estado de Redmine por ellos. Visto el 17/11 en #38985 («Espera validación
+ * consultoría» → «Pendiente por proceso»), que la app mostraba como «Entregada».
+ */
+export const RETURNED_STATUSES = ["Pendiente por proceso"];
+const sameStatus = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+/** ¿La petición está de nuestro lado para la agenda? Los «nuestros» y los regresados. */
+export const oursOnAgenda = (status: string) => [...OURS_STATUSES, ...RETURNED_STATUSES].some((n) => sameStatus(n, status));
 
 // ---------- acuse de recibo ----------
 

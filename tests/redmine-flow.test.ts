@@ -296,3 +296,14 @@ test("la decisión del cierre se lee del botón o de lo que escribe el propietar
 test("la huella del comentario ignora los saltos de Windows y los espacios de los extremos", () => {
   assert.equal(normalizeNotes("  Hola Hugo,\r\nya quedó. 🐼\n"), "Hola Hugo,\nya quedó. 🐼");
 });
+
+test("agenda: lo que Consultoría regresa a «Pendiente por proceso» vuelve a nuestro lado, no es una entrega", async () => {
+  const { oursOnAgenda, OURS_STATUSES } = await import("../src/redmine/flow.ts");
+  assert.equal(oursOnAgenda("Pendiente por proceso"), true);
+  assert.equal(oursOnAgenda(" pendiente por proceso "), true);
+  assert.equal(oursOnAgenda("Comentarios o no aprobado"), true);
+  assert.equal(oursOnAgenda("Espera validación consultoría"), false);
+  assert.equal(oursOnAgenda("Terminado por Desarrollo"), false);
+  // El vigilante no mueve el estado de Redmine desde un estado regresado.
+  assert.equal(OURS_STATUSES.includes("Pendiente por proceso"), false);
+});

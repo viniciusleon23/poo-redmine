@@ -51,6 +51,7 @@ import {
   HANDOFF_STATUS,
   OURS_STATUSES,
   START_STATUS,
+  oursOnAgenda,
   ackComment,
   clarifyRules,
   evidenceRules,
@@ -768,7 +769,7 @@ function issueCards(): IssueCard[] {
     const linked = state.issues[id];
     const work = planner?.workPlan(id);
     const gate = linked?.hold ? planner?.gate(id) : undefined;
-    const ours = OURS_STATUSES.some((n) => same(n, issue.status.name));
+    const ours = oursOnAgenda(issue.status.name);
     // Una pausa que pidió el propietario y que el agente cerró como «bloqueado» se cuenta como pausa.
     const pausedByOwner = linked?.lastMark === "BLOQUEADO" && linked.ownerSaid && linked.handledAt && linked.ownerSaid.at < linked.handledAt && ownerPaused(linked.ownerSaid.text);
     const stage = pausedByOwner ? "EN ESPERA" : linked?.lastMark;
