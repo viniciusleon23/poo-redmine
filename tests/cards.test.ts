@@ -74,3 +74,16 @@ test("ronda de corrección: de las observaciones del supervisor a su última pas
   assert.equal(fixing({ fixes: 1, reviewing: true, closing: false }), false);
   assert.equal(fixing({ fixes: 1, reviewing: false, closing: true }), false);
 });
+
+test("tarea original y subtareas: estado, si está cerrada y si es del propietario", async () => {
+  const { relativeOf } = await import("../src/agenda/cards.ts");
+  const ctx = { closed: new Set([5]), ownerId: 7, url: (id: number) => `https://redmine/issues/${id}` };
+  assert.deepEqual(
+    relativeOf({ id: 38995, subject: "NO APARECEN VIN", status: { id: 2, name: "Comentarios o no aprobado" }, tracker: { name: "Soporte" }, assigned_to: { id: 9, name: "Daniel M." } }, ctx),
+    { id: 38995, subject: "NO APARECEN VIN", status: "Comentarios o no aprobado", closed: false, tracker: "Soporte", assignee: "Daniel M.", mine: false, url: "https://redmine/issues/38995" },
+  );
+  const mine = relativeOf({ id: 1, subject: "x", status: { id: 5, name: "Cerrada" }, tracker: { name: "Subtarea" }, assigned_to: { id: 7, name: "Yo" } }, ctx);
+  assert.equal(mine.closed, true);
+  assert.equal(mine.mine, true);
+  assert.equal(relativeOf({ id: 2, subject: "y", status: { id: 1, name: "Nuevo" }, tracker: { name: "Subtarea" } }, ctx).assignee, undefined);
+});

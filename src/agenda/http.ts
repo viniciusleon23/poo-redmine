@@ -18,7 +18,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { CardState, Turn } from "./cards.ts";
+import type { CardState, IssueRelative, Turn } from "./cards.ts";
 import { PlanError } from "./planner.ts";
 import type { AgendaItem, Planner, Reservation } from "./planner.ts";
 import { dateKey, dayStart } from "./slots.ts";
@@ -41,6 +41,12 @@ export interface IssueCard {
   url: string;
   taskId?: string;
   status: string;
+  /** Tipo en Redmine («Desarrollo», «Subtarea», «Soporte»…). */
+  tracker?: string;
+  /** Si es subtarea: la tarea original, aunque esté asignada a otra persona. */
+  parent?: IssueRelative;
+  /** Sus subtareas directas, abiertas y cerradas. */
+  children?: IssueRelative[];
   priority: string;
   author: string;
   dueDate?: string;

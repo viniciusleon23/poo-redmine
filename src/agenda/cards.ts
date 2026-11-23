@@ -104,3 +104,34 @@ const ORDER: Record<Turn, number> = { tu: 0, poo: 1, otros: 2 };
 export function byTurn<T extends { turn: Turn; issueId: number; work?: { start: number } }>(a: T, b: T) {
   return ORDER[a.turn] - ORDER[b.turn] || (a.work?.start ?? Infinity) - (b.work?.start ?? Infinity) || a.issueId - b.issueId;
 }
+
+/** Una petición emparentada (tarea original o subtarea), dicha para la app. */
+export interface IssueRelative {
+  id: number;
+  subject: string;
+  status: string;
+  /** Redmine la da por cerrada («Resuelta», «Cerrada»…). */
+  closed: boolean;
+  tracker: string;
+  assignee?: string;
+  /** Asignada a la cuenta del propietario. */
+  mine: boolean;
+  url: string;
+}
+
+/** Lo que la app necesita de una incidencia emparentada. Puro. */
+export function relativeOf(
+  issue: { id: number; subject: string; status: { id: number; name: string }; tracker: { name: string }; assigned_to?: { id: number; name: string } },
+  ctx: { closed: ReadonlySet<number>; ownerId?: number; url: (id: number) => string },
+): IssueRelative {
+  return {
+    id: issue.id,
+    subject: issue.subject,
+    status: issue.status.name,
+    closed: ctx.closed.has(issue.status.id),
+    tracker: issue.tracker.name,
+    assignee: issue.assigned_to?.name,
+    mine: ctx.ownerId !== undefined && issue.assigned_to?.id === ctx.ownerId,
+    url: ctx.url(issue.id),
+  };
+}

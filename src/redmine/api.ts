@@ -111,6 +111,12 @@ export function createRedmine(config: RedmineConfig) {
       }
     },
 
+    /** Una incidencia sin movimientos: la tarea original de una subtarea. */
+    brief: (id: number) => get<{ issue: Issue }>(`/issues/${id}.json`).then((r) => r.issue),
+    /** Subtareas directas de una incidencia, abiertas y cerradas. */
+    children: (id: number) =>
+      get<{ issues: Issue[] }>(`/issues.json?parent_id=${id}&status_id=*&sort=id:asc&limit=100`).then((r) => r.issues),
+
     detail: (id: number) =>
       get<{ issue: Issue }>(`/issues/${id}.json?include=journals,attachments,allowed_statuses`).then((r) => r.issue),
 

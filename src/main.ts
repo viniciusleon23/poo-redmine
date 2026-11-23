@@ -30,7 +30,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, s
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgenda } from "./agenda/api.ts";
-import { byTurn, classify, fixing } from "./agenda/cards.ts";
+import { byTurn, classify, fixing, relativeOf } from "./agenda/cards.ts";
+import type { IssueRelative } from "./agenda/cards.ts";
 import { firstSentence, issueStory, ownerPaused, parsePlanBrief, storyOf } from "./agenda/story.ts";
 import type { HistoryEvent } from "./agenda/story.ts";
 import { startAgendaHttp } from "./agenda/http.ts";
@@ -203,6 +204,9 @@ const known = new Map<string, Issue>();
 /** Detalle (con sus movimientos) de cada petición asignada, para el recorrido que muestra la Agenda. */
 const details = new Map<string, Issue>();
 let statusNames = new Map<string, string>();
+/** Tarea original y subtareas de cada petición asignada; se releen cada 10 min o cuando cambia. */
+const relatives = new Map<string, { at: number; updatedOn: string; parent?: IssueRelative; children: IssueRelative[] }>();
+const RELATIVES_TTL_MS = 10 * 60_000;
 
 /**
  * Toma la incidencia: la pasa al estado de análisis si sigue en uno inicial y publica el
@@ -648,6 +652,7 @@ async function refreshStories(issues: Issue[]) {
     if (full) details.set(id, full);
   }
   for (const id of [...details.keys()]) if (!known.has(id)) details.delete(id);
+  await refreshRelatives(issues).catch((err) => log(`agenda: no pude leer tareas originales y subtareas (${errorText(err)})`));
   let changed = false;
   for (const i of issues) {
     const linked = state.issues[i.id];
@@ -663,6 +668,23 @@ async function refreshStories(issues: Issue[]) {
     changed = true;
   }
   if (changed) save();
+}
+
+/** Para la Agenda: de qué tarea es subtarea cada petición y qué subtareas tiene. */
+async function refreshRelatives(issues: Issue[]) {
+  const now = Date.now();
+  const closed = await redmine.closedStatuses();
+  const ctx = { closed, ownerId: state.userId, url: redmine.issueUrl };
+  for (const i of issues) {
+    const id = String(i.id);
+    const had = relatives.get(id);
+    if (had && had.updatedOn === i.updated_on && now - had.at < RELATIVES_TTL_MS) continue;
+    const parentId = i.parent?.id;
+    const parent = parentId ? await redmine.brief(parentId).then((p) => relativeOf(p, ctx), () => had?.parent) : undefined;
+    const children = await redmine.children(i.id).then((list) => list.map((c) => relativeOf(c, ctx)), () => had?.children ?? []);
+    relatives.set(id, { at: now, updatedOn: i.updated_on, parent, children });
+  }
+  for (const id of [...relatives.keys()]) if (!known.has(id)) relatives.delete(id);
 }
 
 // ---------- ciclo ----------
@@ -827,6 +849,9 @@ function issueCards(): IssueCard[] {
       url: redmine.issueUrl(issue.id),
       taskId: linked?.taskId,
       status: issue.status.name,
+      tracker: issue.tracker.name,
+      parent: relatives.get(id)?.parent,
+      children: relatives.get(id)?.children.length ? relatives.get(id)?.children : undefined,
       priority: issue.priority.name,
       author: issue.author.name,
       dueDate: issue.due_date ?? undefined,
